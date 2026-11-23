@@ -314,8 +314,26 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build backend image
-        run: docker build -t stellaredupay/backend:ci ./backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          tags: stellaredupay/backend:ci
+          load: true
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Scan backend image for critical CVEs
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: stellaredupay/backend:ci
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL
 
       - name: Smoke-test backend container
         run: |
@@ -341,7 +359,22 @@ jobs:
           exit 1
 
       - name: Build frontend image
-        run: docker build -t stellaredupay/frontend:ci ./frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          tags: stellaredupay/frontend:ci
+          load: true
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+      - name: Scan frontend image for critical CVEs
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: stellaredupay/frontend:ci
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL
 
       - name: Set immutable image tag
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

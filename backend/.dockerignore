@@ -1,0 +1,28 @@
+# Node dependencies — always reinstalled inside the image
+node_modules
+
+# Test suite and coverage — not needed at runtime
+tests
+coverage
+*.test.js
+
+# Documentation
+docs
+*.md
+
+# Git history
+.git
+.gitignore
+
+# Environment files — secrets must never be baked into the image
+.env
+.env.*
+!.env.example
+
+# Editor / OS artefacts
+.DS_Store
+*.log
+npm-debug.log*
+
+# CI configuration
+.github
