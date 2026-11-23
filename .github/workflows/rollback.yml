@@ -1,0 +1,122 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to roll back to (e.g. sha-abc1234)'
+        required: true
+        type: string
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+        default: production
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  rollback:
+    name: Roll back ${{ github.event.inputs.environment }} to ${{ github.event.inputs.image_tag }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.environment }}
+      url: ${{ github.event.inputs.environment == 'production' && 'https://app.paymentflow.app' || 'https://staging.paymentflow.app' }}
+    concurrency:
+      group: deploy-${{ github.event.inputs.environment }}
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Log in to container registry
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | \
+            docker login "${{ secrets.REGISTRY_HOST }}" \
+              -u "${{ secrets.REGISTRY_USERNAME }}" \
+              --password-stdin
+
+      - name: Set deploy target vars
+        id: target
+        run: |
+          if [ "${{ github.event.inputs.environment }}" = "production" ]; then
+            echo "host=${{ secrets.DEPLOY_HOST_PRODUCTION }}" >> "$GITHUB_OUTPUT"
+            echo "mongo_uri=${{ secrets.PRODUCTION_MONGO_URI }}" >> "$GITHUB_OUTPUT"
+            echo "jwt_secret=${{ secrets.PRODUCTION_JWT_SECRET }}" >> "$GITHUB_OUTPUT"
+            echo "wallet=${{ secrets.PRODUCTION_SCHOOL_WALLET_ADDRESS }}" >> "$GITHUB_OUTPUT"
+            echo "stellar_network=public" >> "$GITHUB_OUTPUT"
+            echo "api_url=https://app.paymentflow.app/api" >> "$GITHUB_OUTPUT"
+            echo "app_url=https://app.paymentflow.app" >> "$GITHUB_OUTPUT"
+          else
+            echo "host=${{ secrets.DEPLOY_HOST_STAGING }}" >> "$GITHUB_OUTPUT"
+            echo "mongo_uri=${{ secrets.STAGING_MONGO_URI }}" >> "$GITHUB_OUTPUT"
+            echo "jwt_secret=${{ secrets.STAGING_JWT_SECRET }}" >> "$GITHUB_OUTPUT"
+            echo "wallet=${{ secrets.STAGING_SCHOOL_WALLET_ADDRESS }}" >> "$GITHUB_OUTPUT"
+            echo "stellar_network=testnet" >> "$GITHUB_OUTPUT"
+            echo "api_url=https://staging.paymentflow.app/api" >> "$GITHUB_OUTPUT"
+            echo "app_url=https://staging.paymentflow.app" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Roll back backend
+        run: |
+          ssh -o StrictHostKeyChecking=no "${{ secrets.DEPLOY_USER }}@${{ steps.target.outputs.host }}" \
+            "docker pull ${{ secrets.REGISTRY_HOST }}/stellaredupay/backend:${{ github.event.inputs.image_tag }} && \
+             docker stop paymentflow-backend-${{ github.event.inputs.environment }} || true && \
+             docker rm paymentflow-backend-${{ github.event.inputs.environment }} || true && \
+             docker run -d --name paymentflow-backend-${{ github.event.inputs.environment }} \
+               --restart unless-stopped \
+               -p 5000:5000 \
+               -e NODE_ENV=${{ github.event.inputs.environment }} \
+               -e MONGO_URI=${{ steps.target.outputs.mongo_uri }} \
+               -e JWT_SECRET=${{ steps.target.outputs.jwt_secret }} \
+               -e STELLAR_NETWORK=${{ steps.target.outputs.stellar_network }} \
+               -e SCHOOL_WALLET_ADDRESS=${{ steps.target.outputs.wallet }} \
+               ${{ secrets.REGISTRY_HOST }}/stellaredupay/backend:${{ github.event.inputs.image_tag }}"
+
+      - name: Roll back frontend
+        run: |
+          ssh -o StrictHostKeyChecking=no "${{ secrets.DEPLOY_USER }}@${{ steps.target.outputs.host }}" \
+            "docker pull ${{ secrets.REGISTRY_HOST }}/stellaredupay/frontend:${{ github.event.inputs.image_tag }} && \
+             docker stop paymentflow-frontend-${{ github.event.inputs.environment }} || true && \
+             docker rm paymentflow-frontend-${{ github.event.inputs.environment }} || true && \
+             docker run -d --name paymentflow-frontend-${{ github.event.inputs.environment }} \
+               --restart unless-stopped \
+               -p 3000:3000 \
+               -e NEXT_PUBLIC_API_URL=${{ steps.target.outputs.api_url }} \
+               ${{ secrets.REGISTRY_HOST }}/stellaredupay/frontend:${{ github.event.inputs.image_tag }}"
+
+      - name: Verify health after rollback
+        run: |
+          for i in $(seq 1 18); do
+            if curl -sf "${{ steps.target.outputs.app_url }}/health/live"; then
+              echo ""
+              echo "Rollback target is live"
+              exit 0
+            fi
+            echo "Waiting for rollback target ($i/18)..."
+            sleep 10
+          done
+          echo "Service did not become ready after rollback"
+          exit 1
+
+      - name: Notify Slack — rollback succeeded
+        if: success()
+        run: |
+          curl -s -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"text\": \":rewind: *Rollback succeeded* on \`${{ github.event.inputs.environment }}\` to \`${{ github.event.inputs.image_tag }}\`\nInitiated by: ${{ github.actor }}\n<${{ steps.target.outputs.app_url }}|Open ${{ github.event.inputs.environment }}>\"
+            }"
+
+      - name: Notify Slack — rollback failed
+        if: failure()
+        run: |
+          curl -s -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"text\": \":rotating_light: *Rollback FAILED* on \`${{ github.event.inputs.environment }}\` to \`${{ github.event.inputs.image_tag }}\`\nInitiated by: ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>\"
+            }"

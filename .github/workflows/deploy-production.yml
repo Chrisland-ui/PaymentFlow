@@ -1,0 +1,97 @@
+name: Deploy — Production
+
+on:
+  workflow_run:
+    workflows: ["Deploy — Staging"]
+    types: [completed]
+    branches: [main]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  deploy-production:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    environment:
+      name: production
+      url: https://app.paymentflow.app
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set image tag
+        id: meta
+        run: |
+          echo "tag=sha-$(git rev-parse --short ${{ github.event.workflow_run.head_sha }})" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to container registry
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | \
+            docker login "${{ secrets.REGISTRY_HOST }}" \
+              -u "${{ secrets.REGISTRY_USERNAME }}" \
+              --password-stdin
+
+      - name: Deploy backend to production
+        run: |
+          ssh -o StrictHostKeyChecking=no "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_PRODUCTION }}" \
+            "docker pull ${{ secrets.REGISTRY_HOST }}/stellaredupay/backend:${{ steps.meta.outputs.tag }} && \
+             docker stop paymentflow-backend || true && \
+             docker rm paymentflow-backend || true && \
+             docker run -d --name paymentflow-backend \
+               --restart unless-stopped \
+               -p 5000:5000 \
+               -e NODE_ENV=production \
+               -e MONGO_URI=${{ secrets.PRODUCTION_MONGO_URI }} \
+               -e JWT_SECRET=${{ secrets.PRODUCTION_JWT_SECRET }} \
+               -e STELLAR_NETWORK=public \
+               -e SCHOOL_WALLET_ADDRESS=${{ secrets.PRODUCTION_SCHOOL_WALLET_ADDRESS }} \
+               ${{ secrets.REGISTRY_HOST }}/stellaredupay/backend:${{ steps.meta.outputs.tag }}"
+
+      - name: Deploy frontend to production
+        run: |
+          ssh -o StrictHostKeyChecking=no "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_PRODUCTION }}" \
+            "docker pull ${{ secrets.REGISTRY_HOST }}/stellaredupay/frontend:${{ steps.meta.outputs.tag }} && \
+             docker stop paymentflow-frontend || true && \
+             docker rm paymentflow-frontend || true && \
+             docker run -d --name paymentflow-frontend \
+               --restart unless-stopped \
+               -p 3000:3000 \
+               -e NEXT_PUBLIC_API_URL=https://app.paymentflow.app/api \
+               ${{ secrets.REGISTRY_HOST }}/stellaredupay/frontend:${{ steps.meta.outputs.tag }}"
+
+      - name: Verify production health
+        run: |
+          for i in $(seq 1 18); do
+            if curl -sf "https://app.paymentflow.app/health/live"; then
+              echo ""
+              echo "Production is live"
+              exit 0
+            fi
+            echo "Waiting for production ($i/18)..."
+            sleep 10
+          done
+          echo "Production did not become ready within 3 minutes"
+          exit 1
+
+      - name: Notify Slack — production deploy succeeded
+        if: success()
+        run: |
+          curl -s -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"text\": \":white_check_mark: *Production deploy succeeded* — \`${{ steps.meta.outputs.tag }}\`\nCommit: ${{ github.event.workflow_run.head_sha }}\nActor: ${{ github.actor }}\n<https://app.paymentflow.app|Open production>\"
+            }"
+
+      - name: Page on-call — production deploy failed
+        if: failure()
+        run: |
+          curl -s -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"text\": \":rotating_light: *Production deploy FAILED* — \`${{ steps.meta.outputs.tag }}\`\nCommit: ${{ github.event.workflow_run.head_sha }}\nActor: ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>\"
+            }"
