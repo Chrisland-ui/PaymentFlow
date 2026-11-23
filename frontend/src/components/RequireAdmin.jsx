@@ -8,43 +8,42 @@ import { useTranslation } from "react-i18next";
  *
  * A centralized route-guard component that blocks all child rendering until
  * the authentication check resolves, then redirects unauthenticated or
- * under-privileged users to /login before any protected content is shown.
+ * under-privileged users appropriately.
+ *
+ * Behavior (Issue #357):
+ *  - If the user has no session at all (not logged in): redirect to /login
+ *    with a returnTo param so they can come back after authenticating.
+ *  - If the user IS logged in but does NOT have admin role: redirect to /403
+ *    so they see a clear "Access Denied" page with a "Request access" option,
+ *    rather than being silently pushed to the login page.
  *
  * Usage — wrap any admin page's exported component:
  *
  *   export default function MyAdminPage() { ... }
- *   // In _app.jsx or directly:
  *   <RequireAdmin><MyAdminPage /></RequireAdmin>
- *
- * Or as a HOC (used by AppLayout internally):
- *
- *   export default RequireAdmin(MyAdminPage);
- *
- * Guarantees:
- *  - No protected JSX is rendered until `checked` is true AND `isAdmin` is true.
- *  - While the auth check is in flight, a neutral loading placeholder is shown.
- *  - On auth failure, the user is redirected to /login with a returnTo param
- *    before the protected content mounts.
  *
  * @param {{ children: React.ReactNode }} props
  */
 export default function RequireAdmin({ children }) {
   const router = useRouter();
-  const { isAdmin, checked } = useAdminAuthContext();
+  const { isAdmin, checked, userId } = useAdminAuthContext();
   const { t } = useTranslation();
 
   useEffect(() => {
     // Only act once the /auth/me round-trip has completed.
-    if (checked && !isAdmin) {
-      router.replace(
-        `/login?returnTo=${encodeURIComponent(router.asPath)}`
-      );
+    if (!checked) return;
+    if (isAdmin) return;
+
+    if (userId) {
+      // User is authenticated but lacks admin role — show 403 with request-access CTA.
+      router.replace(`/403?from=${encodeURIComponent(router.asPath)}`);
+    } else {
+      // No active session at all — redirect to login.
+      router.replace(`/login?returnTo=${encodeURIComponent(router.asPath)}`);
     }
-  }, [checked, isAdmin, router]);
+  }, [checked, isAdmin, userId, router]);
 
   // Block all child rendering until the auth state is resolved AND confirmed.
-  // This prevents any flash of protected content and prevents admin-only API
-  // calls from firing on behalf of unauthenticated users.
   if (!checked || !isAdmin) {
     return (
       <div

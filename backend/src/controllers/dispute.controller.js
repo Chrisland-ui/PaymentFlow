@@ -16,6 +16,7 @@ const { logAudit } = require('../services/auditService');
 const { emit: sseEmit } = require('../services/sseService');
 const { fireWebhook, fireWebhookToEndpoints, notifyDisputeCreated, notifyDisputeResolved } = require('../services/webhookService');
 const { updateStudentBalance } = require('../utils/studentBalanceUpdater');
+const { transition: transitionPayment } = require('../services/paymentTransitionService');
 const School = require('../models/schoolModel');
 const logger = require('../utils/logger').child('DisputeController');
 const {
@@ -152,7 +153,7 @@ async function _syncPaymentStatus(schoolId, txHash, newDisputeStatus) {
   const targetPaymentStatus = DISPUTE_TO_PAYMENT_STATUS[newDisputeStatus];
   if (!targetPaymentStatus) return;
 
-  const payment = await Payment.findOne({ schoolId, txHash });
+  let payment = await Payment.findOne({ schoolId, txHash });
   if (!payment) {
     logger.warn('No payment found to sync after dispute transition', { schoolId, txHash, disputeStatus: newDisputeStatus });
     return;
@@ -171,14 +172,13 @@ async function _syncPaymentStatus(schoolId, txHash, newDisputeStatus) {
     return;
   }
 
-  // Dispute resolution is an authoritative decision equivalent to an admin
-  // action, so it uses the wider ADMIN_PAYMENT_STATUS_TRANSITIONS table
-  // (e.g. DISPUTED -> SUCCESS on rejection, DISPUTED -> REFUNDED on
-  // resolution) via the same $locals.adminOverride flag updatePaymentStatus
-  // uses. $locals is Mongoose's per-document transient store — never persisted.
-  payment.$locals.adminOverride = true;
-  payment.status = targetPaymentStatus;
-  await payment.save();
+  const transitionResult = await transitionPayment(payment, targetPaymentStatus, {
+    adminOverride: true,
+    performedBy: `dispute:${newDisputeStatus}`,
+    schoolId,
+    reason: `Payment status synchronized with dispute status ${newDisputeStatus}`,
+  });
+  payment = transitionResult.payment;
 
   // #1353 — Keep the student's totalPaid/feePaid in sync with the dispute
   // outcome: DISPUTED payments must not count toward totalPaid, and moving

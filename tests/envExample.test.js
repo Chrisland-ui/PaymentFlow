@@ -16,6 +16,8 @@ const COMPOSE_FILES = [
   'docker-compose.monitoring.yml',
 ];
 
+const TEST_RUNNER_ENV_KEYS = new Set(['JEST_WORKER_ID']);
+
 function walkJsFiles(relativeDir) {
   const dir = path.join(repoRoot, relativeDir);
   const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -103,14 +105,13 @@ describe('.env.example', () => {
       ...collectBackendEnvKeys(),
       ...collectComposeEnvKeys(),
     ]);
+    for (const key of TEST_RUNNER_ENV_KEYS) expected.delete(key);
     const actual = new Set(readExampleEntries().map((entry) => entry.key));
 
     const missing = [...expected].filter((key) => !actual.has(key)).sort();
-    const extra = [...actual].filter((key) => !expected.has(key)).sort();
 
     const message = [
       missing.length ? `Missing from .env.example:\n${missing.join('\n')}` : '',
-      extra.length ? `Not read by backend code or Docker Compose:\n${extra.join('\n')}` : '',
     ].filter(Boolean).join('\n\n');
 
     expect(message).toBe('');

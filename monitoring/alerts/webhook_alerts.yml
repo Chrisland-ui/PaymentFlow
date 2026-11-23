@@ -1,6 +1,19 @@
 groups:
   - name: webhook_alerts
     rules:
+      - alert: WebhookEndpointConsecutiveFailures
+        expr: webhook_endpoint_consecutive_failures >= 10
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Webhook endpoint has 10 consecutive failures"
+          description: >
+            Endpoint {{ $labels.endpoint_id }} for school {{ $labels.school_id }}
+            has failed {{ $value }} consecutive delivery attempts. Check the
+            endpoint configuration and recent delivery history.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/WEBHOOK_INTEGRATION.md"
+
       # Alert when more than 20% of webhook deliveries are failing over a 5-minute window
       - alert: WebhookHighFailureRate
         expr: |
@@ -18,6 +31,7 @@ groups:
             More than 20% of webhook deliveries are failing (current rate:
             {{ printf "%.1f" (mul 100 $value) }}%).
             Check dead-letter queue and endpoint health.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/WEBHOOK_INTEGRATION.md"
 
       # Alert when dead-letter count exceeds 50 for any school
       - alert: WebhookDeadLetterGrowing
@@ -31,6 +45,7 @@ groups:
             School {{ $labels.schoolId }} has {{ $value }} webhook deliveries in the
             dead-letter queue. Investigate endpoint health and replay failed deliveries
             via POST /api/webhook-deliveries/:id/replay or the admin DLQ endpoint.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/WEBHOOK_INTEGRATION.md"
 
       # Alert when webhook delivery latency p95 exceeds 5 seconds
       - alert: WebhookHighLatency
@@ -44,3 +59,42 @@ groups:
           description: >
             The 95th-percentile webhook delivery time has exceeded 5 seconds.
             Deliveries approaching the 10 s timeout may be failing silently.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/WEBHOOK_INTEGRATION.md"
+
+      # Alert when the oldest pending webhook retry is more than 1 hour old.
+      # Under normal operation the max backoff is 15 min (WEBHOOK_MAX_BACKOFF_MS).
+      # An age > 3600 s means the retry scheduler has stopped processing or a
+      # delivery is permanently stuck (e.g. lease not recovered after a crash).
+      - alert: WebhookStaleRetry
+        expr: webhook_pending_delivery_age_seconds > 3600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Webhook retry queue has a stale delivery"
+          description: >
+            The oldest pending webhook retry is {{ $value | humanizeDuration }} old.
+            Expected maximum is ~15 minutes (WEBHOOK_MAX_BACKOFF_MS).
+            Check that the webhook retry scheduler is running and that no lease is
+            stuck in 'processing' state (recoverStuckLeases threshold is
+            WEBHOOK_LEASE_TIMEOUT_MS, default 30 s).
+
+      # Alert when 4xx permanent errors are spiking.
+      # Unlike 5xx transient errors, 4xx responses are NOT retried — each one
+      # represents a delivery that is silently dropped. A sustained spike
+      # indicates a misconfigured endpoint (wrong URL, expired auth) that
+      # operators must fix manually.
+      - alert: WebhookPermanent4xxSpike
+        expr: |
+          sum(rate(webhook_deliveries_total{outcome="failure", status_class="4xx"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Webhook 4xx permanent errors are spiking"
+          description: >
+            More than 0.1 permanent 4xx webhook failures per second over the last
+            5 minutes. 4xx responses (except 408/425/429) are not retried — each
+            failed delivery is silently dropped. Check endpoint authentication,
+            payload schema, and URL configuration.
+            Current rate: {{ printf "%.3f" $value }} req/s.

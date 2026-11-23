@@ -1,10 +1,25 @@
 name: Backup restore test
 
 # Weekly scheduled verification that a backup produced by scripts/backup.sh
-# can actually be restored (document count + index + content-fingerprint
-# match). Runs scripts/test-backup-recovery.sh so a corrupted backup or a
-# broken restore procedure is caught in CI instead of only being discovered
-# during a real disaster-recovery event. See issue #1413.
+# can actually be restored to an isolated database and verifies critical
+# collections, indexes, and sample payment document integrity.
+#
+# Issue #94: backup creation tests do not prove recoverability. This workflow
+# automates a full backup → restore → verify cycle so that a corrupted backup
+# archive or a broken restore procedure is caught in CI instead of only being
+# discovered during a real disaster-recovery event.
+#
+# What this verifies:
+#   1. Document count per collection matches before vs after restore.
+#   2. Every index present before backup is present after restore.
+#   3. Field-level content fingerprint matches (detects garbled/swapped fields).
+#   4. The isolated restore database is fully cleaned up after the test.
+#
+# Credentials and tokens:
+#   - BACKUP_HEARTBEAT_URL and BACKUP_NOTIFY_TOKEN are stored as repository
+#     secrets and never appear in logs or job summaries.
+#   - MongoDB runs without authentication (CI-only, ephemeral, no real data).
+#   - No PII or sensitive fixtures are seeded — only synthetic structural data.
 on:
   schedule:
     - cron: '0 3 * * 1' # every Monday at 03:00 UTC
@@ -12,36 +27,321 @@ on:
 
 jobs:
   backup-restore-test:
-    name: Run test-backup-recovery.sh
+    name: Backup restore integrity test (isolated DB)
     runs-on: ubuntu-latest
     services:
       mongodb:
         image: mongo:7
         ports:
           - 27017:27017
+        # Replica set required for multi-document transactions (same pattern as
+        # ci.yml). The restore test itself does not open transactions but seeding
+        # test data through the application stack would fail without it.
         options: >-
-          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
+          --replSet rs0
+          --health-cmd "mongosh --quiet --eval 'try { if (rs.status().ok !== 1) { throw new Error(\"not ready\"); } } catch (e) { try { rs.initiate({ _id: \"rs0\", members: [{ _id: 0, host: \"localhost:27017\" }] }); } catch (e2) {} process.exit(1); } if (!db.hello().isWritablePrimary) { process.exit(1); }'"
           --health-interval 10s
-          --health-timeout 5s
-          --health-retries 12
-          --health-start-period 10s
+          --health-timeout 10s
+          --health-retries 15
+          --health-start-period 30s
+
+    env:
+      # Source database — where test data is seeded and backup is taken from.
+      SOURCE_DB: stellaredupay_backup_restore_src
+      # Restore target — an isolated database, distinct from source, so the
+      # restore never touches production-adjacent data.
+      RESTORE_DB: stellaredupay_backup_restore_dst
+      MONGO_URI: mongodb://localhost:27017/stellaredupay_backup_restore_src
+      BACKUP_DIR: /tmp/backup-restore-ci
+
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install MongoDB Database Tools (mongodump/mongorestore/mongosh)
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            backend/node_modules
+            node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
         run: |
-          curl -sSL https://downloads.mongodb.com/compass/mongodb-mongosh_2.2.7_amd64.deb -o mongosh.deb
-          curl -sSL https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-100.9.4.deb -o db-tools.deb
+          npm ci
+          cd backend && npm ci
+
+      # Install mongodump/mongorestore/mongosh tools alongside the service
+      # container's MongoDB. Versions must be compatible with MongoDB 7.
+      - name: Install MongoDB Database Tools
+        run: |
+          curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | \
+            sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
+          echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] \
+            https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | \
+            sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
           sudo apt-get update -y
-          sudo apt-get install -y ./mongosh.deb ./db-tools.deb
+          sudo apt-get install -y mongodb-database-tools mongodb-mongosh
 
-      - name: Seed a small amount of test data
+      # Seed synthetic structural test data into the isolated source database.
+      # No real PII: every name, email, and ID is a deterministic placeholder.
+      # The schools, students, payments, and audit-log entries created here are
+      # representative of the collections and indexes that must survive a restore.
+      - name: Seed isolated source database with synthetic test data
         run: |
-          mongosh --quiet --eval "db.getSiblingDB('stellaredupay').restore_test_smoke.insertOne({ seededAt: new Date() })" mongodb://localhost:27017
+          mongosh --quiet mongodb://localhost:27017/${SOURCE_DB} --eval "
+            // Schools collection
+            db.schools.insertMany([
+              { schoolId: 'BACKUP-SCH-001', name: 'Test School Alpha', slug: 'test-school-alpha', isActive: true, createdAt: new Date() },
+              { schoolId: 'BACKUP-SCH-002', name: 'Test School Beta',  slug: 'test-school-beta',  isActive: true, createdAt: new Date() }
+            ]);
+            // Students collection
+            db.students.insertMany([
+              { studentId: 'BKUP-STU-001', schoolId: 'BACKUP-SCH-001', name: 'Synthetic Student One',   class: 'Grade5A', deletedAt: null, createdAt: new Date() },
+              { studentId: 'BKUP-STU-002', schoolId: 'BACKUP-SCH-001', name: 'Synthetic Student Two',   class: 'Grade5B', deletedAt: null, createdAt: new Date() },
+              { studentId: 'BKUP-STU-003', schoolId: 'BACKUP-SCH-002', name: 'Synthetic Student Three', class: 'Grade6A', deletedAt: null, createdAt: new Date() }
+            ]);
+            // Payments collection — representative structure including indexed fields
+            db.payments.insertMany([
+              { txHash: 'ci-bkup-hash-001', schoolId: 'BACKUP-SCH-001', studentId: 'BKUP-STU-001', amount: 250,  status: 'SUCCESS',  confirmedAt: new Date(), createdAt: new Date() },
+              { txHash: 'ci-bkup-hash-002', schoolId: 'BACKUP-SCH-001', studentId: 'BKUP-STU-002', amount: 300,  status: 'PENDING',  confirmedAt: null,        createdAt: new Date() },
+              { txHash: 'ci-bkup-hash-003', schoolId: 'BACKUP-SCH-002', studentId: 'BKUP-STU-003', amount: 175,  status: 'SUCCESS',  confirmedAt: new Date(), createdAt: new Date() }
+            ]);
+            // Audit log collection
+            db.auditlogs.insertMany([
+              { schoolId: 'BACKUP-SCH-001', action: 'payment_recorded', performedBy: 'system', targetId: 'BKUP-STU-001', createdAt: new Date() },
+              { schoolId: 'BACKUP-SCH-002', action: 'student_created',  performedBy: 'system', targetId: 'BKUP-STU-003', createdAt: new Date() }
+            ]);
+            print('Seed complete: ' + db.schools.countDocuments() + ' schools, ' +
+              db.students.countDocuments() + ' students, ' +
+              db.payments.countDocuments() + ' payments, ' +
+              db.auditlogs.countDocuments() + ' audit log entries');
+          "
 
-      - name: Run backup + restore verification
+      # Create representative indexes that the restore must preserve. These
+      # mirror the real indexes from the migration scripts and Mongoose models
+      # so a missing-index failure maps to a real production regression.
+      - name: Create representative indexes on source database
+        run: |
+          mongosh --quiet mongodb://localhost:27017/${SOURCE_DB} --eval "
+            db.schools.createIndex({ schoolId: 1 }, { unique: true, name: 'schoolId_unique' });
+            db.schools.createIndex({ slug: 1 },     { unique: true, name: 'slug_unique' });
+            db.students.createIndex({ studentId: 1, schoolId: 1 }, { name: 'studentId_schoolId_compound' });
+            db.students.createIndex({ schoolId: 1, deletedAt: 1 }, { name: 'schoolId_deletedAt' });
+            db.payments.createIndex({ txHash: 1, schoolId: 1 },    { unique: true, name: 'txHash_schoolId_unique' });
+            db.payments.createIndex({ studentId: 1, schoolId: 1, confirmedAt: -1 }, { name: 'studentId_schoolId_confirmedAt' });
+            db.auditlogs.createIndex({ schoolId: 1, createdAt: -1 }, { name: 'schoolId_createdAt' });
+            print('Indexes created');
+          "
+
+      - name: Create backup directory
+        run: mkdir -p "${BACKUP_DIR}"
+
+      - name: Run backup (scripts/backup.sh against source database)
         env:
-          MONGO_URI: mongodb://localhost:27017/stellaredupay
-          BACKEND_INTERNAL_URL: ${{ secrets.BACKUP_HEARTBEAT_URL }}
+          MONGO_URI: mongodb://localhost:27017/${{ env.SOURCE_DB }}
+          BACKUP_DIR: ${{ env.BACKUP_DIR }}
+          RETAIN_DAYS: '7'
+          WEBHOOK_URL: ''
+          BACKUP_NOTIFY_TOKEN: ''
+        run: bash scripts/backup.sh
+
+      - name: Verify backup archive was created and is non-empty
+        run: |
+          ARCHIVE=$(ls -t "${BACKUP_DIR}"/*.gz 2>/dev/null | head -1)
+          if [[ -z "${ARCHIVE}" ]]; then
+            echo "❌ No backup archive found in ${BACKUP_DIR}" >&2
+            exit 1
+          fi
+          SIZE=$(stat -c%s "${ARCHIVE}")
+          echo "Archive: ${ARCHIVE} (${SIZE} bytes)"
+          if [[ "${SIZE}" -lt 1024 ]]; then
+            echo "❌ Archive is suspiciously small (${SIZE} bytes < 1024)" >&2
+            exit 1
+          fi
+          echo "✅ Backup archive exists and is non-trivially sized"
+          # Export for subsequent steps
+          echo "BACKUP_ARCHIVE=${ARCHIVE}" >> "${GITHUB_ENV}"
+
+      # Snapshot document counts and index manifests BEFORE restore so we can
+      # diff them against the isolated restore target.
+      - name: Fingerprint source database before restore
+        run: |
+          mongosh --quiet mongodb://localhost:27017/${SOURCE_DB} --eval "
+            const cols = db.getCollectionNames().sort();
+            let total = 0;
+            cols.forEach(function(c) {
+              const n = db.getCollection(c).countDocuments();
+              total += n;
+              print('COUNT ' + c + ' ' + n);
+            });
+            print('TOTAL ' + total);
+          " > /tmp/source-counts.txt
+          cat /tmp/source-counts.txt
+
+          mongosh --quiet mongodb://localhost:27017/${SOURCE_DB} --eval "
+            db.getCollectionNames().sort().forEach(function(name) {
+              db.getCollection(name).getIndexes().forEach(function(idx) {
+                print(name + '|' + idx.name + '|' + JSON.stringify(idx.key));
+              });
+            });
+          " | sort > /tmp/source-indexes.txt
+          echo "Source indexes ($(wc -l < /tmp/source-indexes.txt) entries):"
+          cat /tmp/source-indexes.txt
+
+      # Restore into an isolated destination database — completely separate from
+      # the source so data cannot bleed across and the test verifies a true
+      # round-trip rather than reading the already-present source data.
+      - name: Restore backup into isolated destination database
+        run: |
+          ARCHIVE=$(ls -t "${BACKUP_DIR}"/*.gz 2>/dev/null | head -1)
+          echo "Restoring ${ARCHIVE} → ${RESTORE_DB}"
+          mongorestore \
+            --uri="mongodb://localhost:27017" \
+            --nsFrom="${SOURCE_DB}.*" \
+            --nsTo="${RESTORE_DB}.*" \
+            --gzip \
+            --archive="${ARCHIVE}" \
+            --drop
+          echo "✅ Restore completed"
+
+      # Verify restored database matches source snapshot on all three axes.
+      - name: Verify restored database — document counts, indexes, and content fingerprint
+        run: |
+          FAILED=0
+
+          # ── 1. Document counts per collection ────────────────────────────
+          echo "=== Checking document counts ==="
+          mongosh --quiet mongodb://localhost:27017/${RESTORE_DB} --eval "
+            const cols = db.getCollectionNames().sort();
+            let total = 0;
+            cols.forEach(function(c) {
+              const n = db.getCollection(c).countDocuments();
+              total += n;
+              print('COUNT ' + c + ' ' + n);
+            });
+            print('TOTAL ' + total);
+          " > /tmp/restore-counts.txt
+          cat /tmp/restore-counts.txt
+
+          # Compare totals
+          SRC_TOTAL=$(grep '^TOTAL' /tmp/source-counts.txt | awk '{print $2}')
+          DST_TOTAL=$(grep '^TOTAL' /tmp/restore-counts.txt | awk '{print $2}')
+          if [[ "${SRC_TOTAL}" != "${DST_TOTAL}" ]]; then
+            echo "❌ Document count mismatch: source=${SRC_TOTAL}, restored=${DST_TOTAL}" >&2
+            FAILED=1
+          else
+            echo "✅ Document count matches: ${SRC_TOTAL}"
+          fi
+
+          # Compare per-collection counts
+          while IFS=' ' read -r label col count; do
+            [[ "${label}" != "COUNT" ]] && continue
+            EXPECTED=$(grep "^COUNT ${col} " /tmp/source-counts.txt | awk '{print $3}')
+            if [[ "${count}" != "${EXPECTED}" ]]; then
+              echo "❌ Collection '${col}': expected ${EXPECTED} docs, got ${count}" >&2
+              FAILED=1
+            fi
+          done < /tmp/restore-counts.txt
+
+          # ── 2. Index manifest comparison ─────────────────────────────────
+          echo ""
+          echo "=== Checking indexes ==="
+          mongosh --quiet mongodb://localhost:27017/${RESTORE_DB} --eval "
+            db.getCollectionNames().sort().forEach(function(name) {
+              db.getCollection(name).getIndexes().forEach(function(idx) {
+                print(name + '|' + idx.name + '|' + JSON.stringify(idx.key));
+              });
+            });
+          " | sort > /tmp/restore-indexes.txt
+          echo "Restored indexes ($(wc -l < /tmp/restore-indexes.txt) entries):"
+          cat /tmp/restore-indexes.txt
+
+          MISSING_INDEXES=$(comm -23 /tmp/source-indexes.txt /tmp/restore-indexes.txt)
+          if [[ -n "${MISSING_INDEXES}" ]]; then
+            echo "❌ Indexes present in source but missing after restore:" >&2
+            echo "${MISSING_INDEXES}" | sed 's/^/  - /' >&2
+            FAILED=1
+          else
+            echo "✅ All source indexes present in restored database"
+          fi
+
+          # ── 3. Critical collection document presence ──────────────────────
+          # Verify at least the synthetic payment documents we seeded are
+          # recoverable by key field (txHash + schoolId).
+          echo ""
+          echo "=== Verifying critical payment document integrity ==="
+          for HASH in ci-bkup-hash-001 ci-bkup-hash-002 ci-bkup-hash-003; do
+            COUNT=$(mongosh --quiet mongodb://localhost:27017/${RESTORE_DB} --eval \
+              "print(db.payments.countDocuments({ txHash: '${HASH}' }))" 2>/dev/null)
+            if [[ "${COUNT}" -lt 1 ]]; then
+              echo "❌ Payment document txHash=${HASH} missing after restore" >&2
+              FAILED=1
+            else
+              echo "✅ Payment txHash=${HASH} present"
+            fi
+          done
+
+          # ── 4. Summary ───────────────────────────────────────────────────
+          echo ""
+          if [[ "${FAILED}" -eq 0 ]]; then
+            echo "✅ PASS — All backup restore integrity checks passed."
+          else
+            echo "❌ FAIL — One or more backup restore integrity checks failed." >&2
+            exit 1
+          fi
+
+      # Send a heartbeat to the monitoring endpoint so the
+      # backup_restore_test_age_seconds Prometheus metric stays fresh.
+      # Failures here are non-fatal (warn only) so a transient backend outage
+      # does not mask a genuine restore failure in the step above.
+      - name: Notify monitoring endpoint (non-fatal)
+        if: success()
+        env:
+          BACKUP_HEARTBEAT_URL: ${{ secrets.BACKUP_HEARTBEAT_URL }}
           BACKUP_NOTIFY_TOKEN: ${{ secrets.BACKUP_NOTIFY_TOKEN }}
-        run: bash scripts/test-backup-recovery.sh
+        run: |
+          if [[ -z "${BACKUP_NOTIFY_TOKEN}" ]]; then
+            echo "WARNING: BACKUP_NOTIFY_TOKEN not set — heartbeat skipped (metric may be stale)"
+          else
+            if curl -sf -X POST "${BACKUP_HEARTBEAT_URL:-http://localhost:5000}/api/internal/backup-restore-test-heartbeat" \
+                -H "Authorization: Bearer ${BACKUP_NOTIFY_TOKEN}" >/dev/null 2>&1; then
+              echo "Restore-test heartbeat sent"
+            else
+              echo "WARNING: restore-test heartbeat failed (non-fatal)"
+            fi
+          fi
+
+      # Always clean up the isolated restore database and temp backup files so
+      # no synthetic test data or archive remains after the job completes.
+      # This runs even if earlier steps fail (cleanup obligation from issue #94).
+      - name: Cleanup — drop isolated restore database and remove backup files
+        if: always()
+        run: |
+          echo "Dropping isolated restore database: ${RESTORE_DB}"
+          mongosh --quiet mongodb://localhost:27017 --eval \
+            "db.getSiblingDB('${RESTORE_DB}').dropDatabase(); print('Dropped: ${RESTORE_DB}');"
+          echo "Dropping source test database: ${SOURCE_DB}"
+          mongosh --quiet mongodb://localhost:27017 --eval \
+            "db.getSiblingDB('${SOURCE_DB}').dropDatabase(); print('Dropped: ${SOURCE_DB}');"
+          echo "Removing backup files from ${BACKUP_DIR}"
+          rm -rf "${BACKUP_DIR}"
+          echo "✅ Cleanup complete"
+
+      # Upload verification artefacts so operators can inspect the exact counts
+      # and index manifests that were compared. Retained for 30 days.
+      - name: Upload verification artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-restore-verification-${{ github.run_id }}
+          path: |
+            /tmp/source-counts.txt
+            /tmp/restore-counts.txt
+            /tmp/source-indexes.txt
+            /tmp/restore-indexes.txt
+          retention-days: 30

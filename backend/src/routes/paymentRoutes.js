@@ -57,11 +57,13 @@ const {
   validateCreatePaymentIntent,
   validateVerifyPayment,
   validateSubmitTransaction,
+  validatePagination,
 } = require('../middleware/validate');
 const { resolveSchool } = require('../middleware/schoolContext');
 const idempotencyMiddleware = require('../middleware/idempotency');
 const { auditContext } = require('../middleware/auditContext');
-const { strictLimiter, verifyLimiter } = require('../middleware/rateLimiter');
+const { strictLimiter, verifyLimiter, syncLimiter } = require('../middleware/rateLimiter');
+const { contractPaused } = require('../middleware/contractPaused');
 
 const router = express.Router();
 
@@ -168,12 +170,15 @@ router.post(
   validateCreatePaymentIntent,
   idempotency,
   resolveSchool,
+  contractPaused,
   createPaymentIntent,
 );
 router.post(
   "/submit",
   validateSubmitTransaction,
+  idempotency,
   resolveSchool,
+  contractPaused,
   submitTransaction,
 );
 
@@ -181,7 +186,7 @@ router.post(
 router.use(resolveSchool);
 
 // Payment read endpoints now require authentication (Issue #1040)
-router.get("/", requireSchoolAuth(), getAllPayments);
+router.get("/", requireSchoolAuth(), validatePagination, getAllPayments);
 router.get("/summary", requireSchoolAuth(), getPaymentSummary);
 router.get("/accepted-assets", requireSchoolAuth(), getAcceptedAssets);
 router.get("/limits", requireSchoolAuth(), getPaymentLimitsEndpoint);
@@ -200,13 +205,14 @@ router.post(
   verifyLimiter,
   idempotency,
   validateVerifyPayment,
+  contractPaused,
   verifyPayment,
 );
 // syncLimiter runs after requireAdminAuth on purpose: it keys on
 // req.schoolId, which auth is what populates.
-router.post("/sync", strictLimiter, requireAdminAuth, syncLimiter, auditContext, syncAllPayments);
-router.post("/finalize", requireAdminAuth, auditContext, finalizePayments);
-router.post("/dlq/:id/retry", requireSchoolAuth(), retryDeadLetterJob);
+router.post("/sync", strictLimiter, requireAdminAuth, syncLimiter, auditContext, contractPaused, syncAllPayments);
+router.post("/finalize", requireAdminAuth, auditContext, contractPaused, finalizePayments);
+router.post("/dlq/:id/retry", requireSchoolAuth(), contractPaused, retryDeadLetterJob);
 
 router.get("/balance/:studentId", validateStudentIdParam, requireSchoolAuth(), getStudentBalance);
 router.get(
@@ -219,24 +225,24 @@ router.get("/receipt/:txHash", generateReceipt);
 router.get("/queue/:txHash", requireSchoolAuth(), getQueueJobStatus);
 router.get("/:studentId", validateStudentIdParam, requireSchoolAuth(), getStudentPayments);
 
-router.post("/:paymentId/lock", requireSchoolAuth(), lockPaymentForUpdate);
+router.post("/:paymentId/lock", requireSchoolAuth(), contractPaused, lockPaymentForUpdate);
 router.post("/:paymentId/unlock", requireSchoolAuth(), unlockPayment);
 
 // Registered BEFORE "/:txHash/status" on purpose: Express matches in order, so
 // the parameterised route would otherwise capture "bulk" as a txHash.
-router.patch("/bulk/status", requireAdminAuth, auditContext, bulkUpdatePaymentStatus);
-router.patch("/:txHash/status", requireAdminAuth, auditContext, updatePaymentStatus);
-router.patch("/:txHash/suspicion-review", requireAdminAuth, auditContext, reviewSuspiciousPayment);
-router.patch("/:txHash/correct-placeholder", requireAdminAuth, auditContext, correctPlaceholderPayment);
+router.patch("/bulk/status", requireAdminAuth, auditContext, contractPaused, bulkUpdatePaymentStatus);
+router.patch("/:txHash/status", requireAdminAuth, auditContext, contractPaused, updatePaymentStatus);
+router.patch("/:txHash/suspicion-review", requireAdminAuth, auditContext, contractPaused, reviewSuspiciousPayment);
+router.patch("/:txHash/correct-placeholder", requireAdminAuth, auditContext, contractPaused, correctPlaceholderPayment);
 
-router.post("/:txHash/refund", requireAdminAuth, auditContext, initiatePaymentRefund);
-router.post("/refunds/:refundId/approve", requireAdminAuth, auditContext, approvePaymentRefund);
+router.post("/:txHash/refund", requireAdminAuth, auditContext, contractPaused, initiatePaymentRefund);
+router.post("/refunds/:refundId/approve", requireAdminAuth, auditContext, contractPaused, approvePaymentRefund);
 router.get("/:txHash/refunds", getPaymentRefunds);
 router.get("/refunds/school/list", requireAdminAuth, getSchoolRefunds);
 
 router.get("/verify/:receiptId", verifyReceipt);
 
 router.get("/reconciliation/reports", requireAdminAuth, getReconciliationReports);
-router.post("/reconciliation/report", requireAdminAuth, auditContext, generateSchoolReconciliationReport);
+router.post("/reconciliation/report", requireAdminAuth, auditContext, contractPaused, generateSchoolReconciliationReport);
 
 module.exports = router;

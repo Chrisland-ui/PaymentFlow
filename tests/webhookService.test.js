@@ -19,6 +19,30 @@ jest.mock('../backend/src/models/webhookRetryModel', () => ({
   findOneAndUpdate: jest.fn(),
 }));
 
+// webhookService imports schoolModel which transitively imports StellarSdk;
+// mock it to avoid the SDK's browser-environment assumption crashing Jest.
+jest.mock('../backend/src/models/schoolModel', () => ({
+  find:    jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue([]) }),
+  findOne: jest.fn().mockResolvedValue(null),
+}));
+
+jest.mock('../backend/src/models/webhookDeliveryModel', () => ({
+  create:    jest.fn().mockResolvedValue({}),
+  aggregate: jest.fn().mockResolvedValue([]),
+}));
+
+jest.mock('../backend/src/models/webhookEndpointModel', () => ({
+  find: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue([]) }),
+}));
+
+jest.mock('../backend/src/utils/dnsCache', () => ({
+  resolveDnsWithCache: jest.fn().mockResolvedValue(['203.0.113.1']),
+}));
+
+jest.mock('../backend/src/utils/buildWebhookPayload', () => ({
+  buildWebhookPayload: jest.fn((payload) => payload),
+}));
+
 jest.mock('../backend/src/utils/validateWebhookUrl', () => ({
   validateWebhookUrl: jest.fn().mockResolvedValue({ valid: true }),
   // Send-time SSRF re-check; { blocked: false } means the resolved IP is allowed.
@@ -77,10 +101,27 @@ beforeEach(() => {
 // ─── getBackoffDelay ──────────────────────────────────────────────────────────
 
 describe('getBackoffDelay', () => {
-  test('attempt 0 → 1 minute', () => expect(getBackoffDelay(0)).toBe(60000));
-  test('attempt 1 → 5 minutes', () => expect(getBackoffDelay(1)).toBe(300000));
-  test('attempt 2 → 15 minutes', () => expect(getBackoffDelay(2)).toBe(900000));
-  test('beyond max clamps to last delay', () => expect(getBackoffDelay(99)).toBe(900000));
+  // getBackoffDelay applies ±10% jitter, so we test ranges rather than exact values.
+  test('attempt 0 is within ±10% of 1 minute (60 000 ms)', () => {
+    const delay = getBackoffDelay(0);
+    expect(delay).toBeGreaterThanOrEqual(54000);  // 60000 * 0.9
+    expect(delay).toBeLessThanOrEqual(66000);     // 60000 * 1.1
+  });
+  test('attempt 1 is within ±10% of 5 minutes (300 000 ms)', () => {
+    const delay = getBackoffDelay(1);
+    expect(delay).toBeGreaterThanOrEqual(270000);
+    expect(delay).toBeLessThanOrEqual(330000);
+  });
+  test('attempt 2 is within ±10% of 15 minutes (900 000 ms)', () => {
+    const delay = getBackoffDelay(2);
+    expect(delay).toBeGreaterThanOrEqual(810000);
+    expect(delay).toBeLessThanOrEqual(990000);
+  });
+  test('beyond max clamps to last slot, still within ±10% of 900 000 ms', () => {
+    const delay = getBackoffDelay(99);
+    expect(delay).toBeGreaterThanOrEqual(810000);
+    expect(delay).toBeLessThanOrEqual(990000);
+  });
 });
 
 // ─── fireWebhook — first delivery failure ────────────────────────────────────

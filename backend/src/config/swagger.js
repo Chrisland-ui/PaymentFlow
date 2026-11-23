@@ -6,6 +6,7 @@
  */
 
 const swaggerJsdoc = require('swagger-jsdoc');
+const { TAXONOMY } = require('../errors/paymentErrorTaxonomy');
 
 const options = {
   definition: {
@@ -23,6 +24,7 @@ const options = {
         url: 'https://opensource.org/licenses/MIT',
       },
     },
+    'x-error-codes': TAXONOMY,
     servers: [
       {
         url: process.env.API_URL || 'http://localhost:5000/api',

@@ -65,6 +65,22 @@ const fr = {
     back: "Retour",
   },
 
+  pagination: {
+    label: "Pagination",
+    firstPage: "Première page",
+    lastPage: "Dernière page",
+    previousPage: "Page précédente",
+    nextPage: "Page suivante",
+    firstPageAria: "Aller à la première page sur {{total}}",
+    lastPageAria: "Aller à la dernière page sur {{total}}",
+    previousPageAria: "Aller à la page précédente (page {{page}} sur {{total}})",
+    nextPageAria: "Aller à la page suivante (page {{page}} sur {{total}})",
+    pageAria: "Page {{page}} sur {{total}}",
+    ellipsis: "Plus de pages",
+    rangeOf: "{{start}}–{{end}} sur {{total}} {itemLabel}",
+    shortcutHint: "Appuyez sur g suivi d'un numéro pour aller à cette page",
+  },
+
   time: {
     never: "Jamais",
     justNow: "À l'instant",
@@ -277,6 +293,7 @@ const fr = {
     verifying: "Vérification…",
     submit: "Vérifier la transaction",
     verificationFailed: "Échec de la vérification. Vérifiez le hash de transaction et réessayez.",
+    alreadyCreated: "Ce paiement a déjà été créé. Aucun doublon n'a été enregistré.",
     checkNetworkStatus: "Vérifier le statut du réseau Stellar ↗",
     transactionFound: "Transaction trouvée",
     amount: "Montant",
@@ -641,6 +658,13 @@ const fr = {
     emptyNone: "Aucun étudiant n'a encore été enregistré.",
     rangeOf: "{{start}}–{{end}} de {{total}} étudiants",
     paginationAria: "Pagination de la liste des étudiants",
+    densityCompact: "Compact",
+    densityDefault: "Standard",
+    densityComfortable: "Aéré",
+    densityLabel: "Densité des lignes",
+    expandRow: "Développer les détails de la ligne",
+    collapseRow: "Réduire les détails de la ligne",
+    expandedDetails: "Détails",
   },
   fees: {
     eyebrow: "Administration",
@@ -733,6 +757,12 @@ const fr = {
     failed: "Mises à jour en direct indisponibles — actualisez la page pour restaurer les données en temps réel.",
     reconnecting: "Reconnexion aux mises à jour en direct…",
     degraded: "Mises à jour en temps réel dégradées — certains événements peuvent ne pas s'afficher tant que la connexion n'est pas rétablie.",
+    verifyManually: "Vérifier manuellement",
+  },
+
+  offlineBanner: {
+    message: "Vous êtes hors ligne.",
+    submsg: "Les actions de paiement sont désactivées. Les données seront actualisées automatiquement lorsque vous vous reconnecterez.",
   },
 
   errorBoundary: {
@@ -741,6 +771,8 @@ const fr = {
     reload: "Recharger la page",
     goBack: "Retour",
     goHome: "Accueil",
+    retry: "Réessayer",
+    correlationId: "Référence : {{id}}",
   },
 
   paymentPlan: {
@@ -793,6 +825,27 @@ const fr = {
     saveChanges: "Enregistrer les modifications",
     nameRequired: "Le nom est requis",
     parentEmailInvalid: "Entrez une adresse e-mail valide",
+  },
+
+  dateRangePicker: {
+    ariaLabel: "Sélecteur de plage de dates",
+    timezoneLabel: "Dates affichées en {{tz}}",
+    changeTimezone: "Changer de fuseau horaire",
+    hideTimezone: "Masquer le fuseau horaire",
+    timezoneSelectLabel: "Fuseau horaire personnalisé",
+    presetsLabel: "Plages de dates prédéfinies",
+    fromLabel: "Du",
+    toLabel: "Au",
+    fromAriaLabel: "Date de début",
+    toAriaLabel: "Date de fin",
+    preset: {
+      today: "Aujourd'hui",
+      yesterday: "Hier",
+      last7: "7 derniers jours",
+      thisMonth: "Ce mois-ci",
+      lastMonth: "Mois dernier",
+      custom: "Personnalisé",
+    },
   },
 };
 

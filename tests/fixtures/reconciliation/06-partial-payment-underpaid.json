@@ -1,0 +1,34 @@
+{
+  "id": "scenario-06-partial-payment-underpaid",
+  "description": "Payment amount is less than the required fee (underpaid). Backend should record it as underpaid and initiate reconciliation flow per migration 024.",
+  "contractState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000006",
+    "status": "confirmed",
+    "amount": "75.0000000",
+    "asset": "XLM",
+    "from": "GPARENT6AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "to":   "GSCHOOL1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "memo": "STU006",
+    "ledger": 1060,
+    "createdAt": "2026-10-06T13:00:00.000Z"
+  },
+  "backendState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000006",
+    "status": "underpaid",
+    "amount": 75,
+    "requiredAmount": 100,
+    "studentId": "STU006",
+    "confirmedAt": "2026-10-06T13:00:06.000Z",
+    "underpaidReconciliation": {
+      "status": "pending",
+      "appliedCredit": 0,
+      "creditAppliedAt": null
+    }
+  },
+  "expectedOutcome": {
+    "action": "none",
+    "finalBackendStatus": "underpaid",
+    "divergence": false,
+    "divergenceType": "underpaid"
+  }
+}

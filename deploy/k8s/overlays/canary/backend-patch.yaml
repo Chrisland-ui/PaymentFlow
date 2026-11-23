@@ -22,11 +22,14 @@ spec:
       containers:
         - name: backend
           image: stellaredupay/backend:canary
+          # Canary pods use the dedicated /health/ready probe which only passes
+          # once migrations have run and all dependencies are reachable.
+          # This ensures canary traffic is only served after a healthy startup.
           readinessProbe:
             httpGet:
               path: /health/ready
               port: 5000
-            initialDelaySeconds: 30
+            initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3

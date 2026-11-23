@@ -139,9 +139,23 @@ Additional security headers set alongside CSP:
 
 | Header | Value |
 |--------|-------|
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` |
 | `X-Frame-Options` | `DENY` |
 | `X-Content-Type-Options` | `nosniff` |
 | `Referrer-Policy` | `strict-origin-when-cross-origin` |
+
+The frontend also sends `Content-Security-Policy-Report-Only` with the same
+policy and `report-uri /api/csp-report`. The same-origin Next.js API rewrite
+forwards reports to the backend collector. The collector accepts both the
+legacy `application/csp-report` format and modern JSON report bodies, applies
+the configured `MAX_BODY_SIZE` limit, and is covered by the existing global
+request rate limiter.
+
+Deployment workflows should call `.github/workflows/frontend-security-headers.yml`
+with the staging or preview URL before shifting traffic. The reusable gate
+checks CSP, report-only CSP, HSTS, X-Frame-Options, X-Content-Type-Options, and
+Referrer-Policy on the actual HTTP response. It can also be run manually with
+`FRONTEND_URL` or as a positional URL argument.
 
 ---
 

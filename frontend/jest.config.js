@@ -6,6 +6,12 @@ module.exports = {
   transform: {
     '^.+\\.[jt]sx?$': ['babel-jest', { presets: [['@babel/preset-env', { targets: { node: 'current' } }]] }],
   },
+  // Stub Next.js internals that are unavailable in the node test environment.
+  // Individual test files may override these via jest.mock().
+  moduleNameMapper: {
+    '^next/router$': '<rootDir>/src/__mocks__/next/router.js',
+    '^next/navigation$': '<rootDir>/src/__mocks__/next/navigation.js',
+  },
   // Collect coverage for application source only — exclude tests and generated
   // files. Coverage is reported for lines, statements, functions AND branches
   // (the per-branch view is what surfaces unexecuted error/failover paths).

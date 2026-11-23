@@ -80,6 +80,7 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
+          # See docs/k8s-resource-sizing.md for sizing rationale.
           resources:
             requests:
               cpu: "250m"

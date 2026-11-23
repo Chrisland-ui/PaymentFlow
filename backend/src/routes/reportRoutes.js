@@ -15,6 +15,8 @@ const requireFinanceRole = requireSchoolAuth(['owner', 'finance']);
 router.use(resolveSchool);
 
 router.get('/dashboard', requireFinanceRole, getDashboard);
+router.get('/:jobId/status', requireFinanceRole, validate(reportQuerySchema, 'query'), getReportJob);
+router.get('/:jobId/download', requireFinanceRole, validate(reportQuerySchema, 'query'), downloadReportJob);
 router.get('/jobs/:jobId', requireFinanceRole, validate(reportQuerySchema, 'query'), getReportJob);
 router.get('/jobs/:jobId/download', requireFinanceRole, validate(reportQuerySchema, 'query'), downloadReportJob);
 router.get('/', requireFinanceRole, validate(reportQuerySchema, 'query'), getReport);

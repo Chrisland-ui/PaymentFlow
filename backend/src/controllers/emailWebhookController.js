@@ -12,12 +12,14 @@
 
 const suppressionList = require('../services/email/suppressionList');
 const logger = require('../utils/logger').child('EmailWebhook');
+const { timingSafeEqualStrings } = require('../middleware/validateInboundWebhook');
 
 function checkSecret(req) {
   const expected = process.env.EMAIL_WEBHOOK_SECRET;
   if (!expected) return true; // not configured — accept (dev). Set it in prod.
   const provided = req.headers['x-webhook-token'] || req.query.token;
-  return provided === expected;
+  if (!provided || typeof provided !== 'string') return false;
+  return timingSafeEqualStrings(provided, expected);
 }
 
 /**

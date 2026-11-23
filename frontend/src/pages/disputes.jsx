@@ -1,13 +1,18 @@
 import { useState, useEffect, useCallback } from "react";
 import { getDisputes, resolveDispute } from "../services/api";
 import { getErrorMessage } from "../utils/errorMessages";
+import { useAbortController } from "../hooks/useAbortController";
 import {
   IconAlertTriangle, IconExternalLink,
-  IconChevronLeft, IconChevronRight, IconSearch,
+  IconSearch,
 } from "../components/Icons";
 import PageHero from "../components/PageHero";
+import Pagination from "../components/Pagination";
 import RequireAdmin from "../components/RequireAdmin";
+import EmptyState from "../components/EmptyState";
+import AccessiblePagination from "../components/AccessiblePagination";
 import { useTranslation } from "react-i18next";
+import TimestampDisplay, { DISPLAY_MODE } from "../components/TimestampDisplay";
 
 const STATUS_META = {
   open:         { cls: "badge-success", labelKey: "status.dispute.open" },
@@ -140,7 +145,11 @@ function DisputeCard({ dispute, expanded, onToggle, onResolved }) {
               <span style={{ fontWeight: 700, fontSize: "0.9375rem" }}>{dispute.studentId}</span>
               <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{t("disputes.byLabel", { name: dispute.raisedBy })}</span>
               <span style={{ fontSize: "0.75rem", color: "var(--text-subtle)" }}>
-                {new Date(dispute.createdAt).toLocaleDateString(undefined, { dateStyle: "medium" })}
+                <TimestampDisplay
+                  iso={dispute.createdAt}
+                  mode={DISPLAY_MODE.UTC}
+                  dateOnly
+                />
               </span>
             </div>
             <div style={{ marginTop: "0.375rem", display: "flex", alignItems: "center", gap: "0.375rem" }}>
@@ -198,6 +207,7 @@ function DisputesContent() {
   const [page, setPage]               = useState(1);
   const [totalPages, setTotalPages]   = useState(1);
   const [totalCount, setTotalCount]   = useState(0);
+  const [pageSize, setPageSize]       = useState(20);
   const [statusFilter, setStatusFilter] = useState("");
   const [studentFilter, setStudentFilter] = useState("");
   const [draftStudent, setDraftStudent]   = useState("");
@@ -205,25 +215,37 @@ function DisputesContent() {
 
   // Auth is cookie-based; the axios interceptor in api.js handles 401 → /login redirect.
 
+  // Issue #254 — abort in-flight requests when the component unmounts so we
+  // never call setState on an unmounted component or apply stale responses.
+  const { signal } = useAbortController();
+
   const fetchDisputes = useCallback(async (p = page) => {
     setLoading(true);
     setError(null);
     try {
-      const params = { page: p, limit: 20 };
+      const params = { page: p, limit: pageSize };
       if (statusFilter) params.status = statusFilter;
       if (studentFilter.trim()) params.studentId = studentFilter.trim();
-      const res = await getDisputes(params);
+      const res = await getDisputes(params, { signal });
       setDisputes(res.data.disputes || []);
       setTotalPages(res.data.pagination?.totalPages || 1);
       setTotalCount(res.data.pagination?.total || 0);
     } catch (err) {
+      // Silently ignore requests cancelled on unmount.
+      if (err?.name === "CanceledError" || err?.code === "ERR_CANCELED") return;
       setError(getErrorMessage(err.response?.data?.code, err.response?.data?.error) || t("disputes.failedToLoad"));
     } finally {
       setLoading(false);
     }
-  }, [page, statusFilter, studentFilter, t]);
+  }, [page, pageSize, statusFilter, studentFilter, t, signal]);
 
-  useEffect(() => { fetchDisputes(page); }, [page, statusFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { fetchDisputes(page); }, [page, pageSize, statusFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // When page size changes, reset to first page.
+  function handlePageSizeChange(newSize) {
+    setPageSize(newSize);
+    setPage(1);
+  }
 
   function handleResolved(updated) {
     setDisputes(prev => prev.map(d => d._id === updated._id ? updated : d));
@@ -324,12 +346,22 @@ function DisputesContent() {
             ))}
           </div>
         ) : disputes.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "4rem", color: "var(--text-muted)" }}>
-            <p style={{ fontWeight: 500, marginBottom: "0.25rem" }}>{t("disputes.empty")}</p>
-            <p style={{ fontSize: "0.8125rem" }}>
-              {statusFilter || studentFilter ? t("disputes.emptyFilters") : t("disputes.emptyNone")}
-            </p>
-          </div>
+          <EmptyState
+            variant={statusFilter || studentFilter ? "filtered" : "empty"}
+            title={t("disputes.empty")}
+            description={statusFilter || studentFilter ? t("disputes.emptyFilters") : t("disputes.emptyNone")}
+            action={
+              statusFilter || studentFilter
+                ? {
+                    label: t("disputes.clearFilters"),
+                    onClick: () => {
+                      setStatusFilter("");
+                      setStudentFilter("");
+                    },
+                  }
+                : undefined
+            }
+          />
         ) : (
           <div>
             <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", marginBottom: "0.75rem" }}>
@@ -347,27 +379,18 @@ function DisputesContent() {
             ))}
 
             {totalPages > 1 && (
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: "1rem" }}>
-                <span className="pagination-info">{t("disputes.pageOf", { page, total: totalPages })}</span>
-                <div className="pagination-controls">
-                  <button
-                    className="page-btn"
-                    onClick={() => setPage(p => Math.max(1, p - 1))}
-                    disabled={page === 1}
-                    style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}
-                  >
-                    <IconChevronLeft size={15} /> {t("actions.prev")}
-                  </button>
-                  <button
-                    className="page-btn"
-                    onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                    disabled={page === totalPages}
-                    style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}
-                  >
-                    {t("actions.next")} <IconChevronRight size={15} />
-                  </button>
-                </div>
-              </div>
+              <AccessiblePagination
+                currentPage={page}
+                totalPages={totalPages}
+                onPageChange={setPage}
+                total={totalCount}
+                rangeStart={(page - 1) * 20 + 1}
+                rangeEnd={Math.min(page * 20, totalCount)}
+                loading={loading}
+                ariaLabel={t("disputes.title")}
+                itemLabel={t("disputes.title")}
+              />
+            )}
             )}
           </div>
         )}

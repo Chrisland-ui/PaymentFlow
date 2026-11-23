@@ -940,6 +940,29 @@ table.data-table {
   animation: shimmer 1.6s infinite linear;
 }
 
+/* ── Pulse-style skeleton blocks (issue #13) ── */
+@keyframes skel-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.45; }
+}
+.skeleton-block {
+  border-radius: 4px;
+  background: var(--border);
+  animation: skel-pulse 1.4s ease-in-out infinite;
+}
+/* prefers-reduced-motion: drop animation, keep visual placeholder */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-block {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+/* Explicit opt-out class (JS sets this when it detects reduced-motion) */
+.skeleton-block.skeleton-static {
+  animation: none !important;
+  opacity: 0.6;
+}
+
 /* ══════════════════════════════════════════════════════════
    UTILITY
 ══════════════════════════════════════════════════════════ */
@@ -1767,3 +1790,110 @@ html.dark textarea::placeholder { color: var(--text-subtle); }
             justify-content: center;
           }
         }
+
+/* ══════════════════════════════════════════════════════════
+   REDUCED MOTION  (issue #20)
+   Honour prefers-reduced-motion for all payment workflows,
+   dialogs, polling indicators, and route transitions.
+   Users who opt in to reduced motion still receive full
+   status feedback — only non-essential decorative motion
+   is suppressed or shortened.
+══════════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  /*
+   * 1. Global catch-all: collapse duration / iteration for
+   *    every animation and transition in the app.
+   */
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /*
+   * 2. Named keyframe animations used across payment workflows.
+   *    Each rule preserves the final visible state so that status
+   *    indicators (badges, banners, skeleton screens) remain
+   *    comprehensible without motion.
+   */
+
+  /* Dashboard entry animation — dashFadeUp (dashboard.jsx) */
+  .dash-wrap {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  /* Skeleton loading pulse — skel-pulse (dashboard.jsx) */
+  .skel-block {
+    animation: none !important;
+    opacity: 0.7 !important;
+  }
+
+  /* Payment-form / card slide-up transitions */
+  .pf-slide-in,
+  .pay-card-enter {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  /* Hero / landing page animated blobs */
+  .lp-blob-1,
+  .lp-blob-2,
+  .lp-blob-3 {
+    animation: none !important;
+  }
+
+  /* Spin animations used by loading / polling indicators */
+  .spin,
+  [class*="spin-"],
+  .loading-spinner {
+    animation: none !important;
+  }
+
+  /* Progress-bar fill transitions */
+  .progress-bar,
+  .progress-fill,
+  [role="progressbar"] {
+    transition: none !important;
+  }
+
+  /* Sidebar / nav open-close slide */
+  .sidebar,
+  .nav-slide {
+    transition: none !important;
+  }
+
+  /* Generic fade-in / slide-up utility classes */
+  .fade-in,
+  .slide-up,
+  .animate-in {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  /* Modal / dialog entrance animations */
+  .modal,
+  .dialog,
+  [role="dialog"] {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  /* SSE degraded banner pulse */
+  .sse-pulse,
+  .banner-pulse {
+    animation: none !important;
+  }
+
+  /* SyncButton spinner */
+  .sync-spin {
+    animation: none !important;
+  }
+}

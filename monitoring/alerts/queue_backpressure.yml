@@ -25,6 +25,7 @@ groups:
             high-water mark for 5 minutes. The poller is throttling intake
             (see transactionPollingService.getEffectiveBatchSize). Check
             whether Horizon or MongoDB latency is the bottleneck.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#paymentqueuebackpressurehighwater"
 
       # ── Critical: queue at/near configured maximum depth ─────────────────
       # payment_processor_queue_max_depth mirrors MAX_QUEUE_DEPTH. At or above
@@ -43,3 +44,4 @@ groups:
             minutes. New payments are being rejected with QUEUE_FULL. Page
             on-call; consider raising MAX_QUEUE_DEPTH or investigating why the
             queue isn't draining.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#paymentqueuenearcapacity"

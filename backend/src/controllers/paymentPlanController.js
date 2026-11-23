@@ -3,6 +3,8 @@
 const PaymentPlan = require('../models/paymentPlanModel');
 const Student = require('../models/studentModel');
 const { logAudit } = require('../services/auditService');
+const Decimal = require('decimal.js');
+const { validateDecimalAmount } = require('../utils/decimalPrecision');
 
 async function createPaymentPlan(req, res, next) {
   try {
@@ -14,19 +16,32 @@ async function createPaymentPlan(req, res, next) {
       return res.status(400).json({ error: 'At least one installment is required', code: 'VALIDATION_ERROR' });
     }
 
+    const normalizedInstallments = [];
+    for (let index = 0; index < installments.length; index++) {
+      const amount = validateDecimalAmount(installments[index]?.amount, { minValue: 0.01 });
+      if (!amount.ok) {
+        return res.status(400).json({
+          error: `Installment ${index + 1}: ${amount.error}`,
+          code: amount.code,
+          field: `installments.${index}.amount`,
+        });
+      }
+      normalizedInstallments.push({ ...installments[index], amount: amount.value });
+    }
+
     const student = await Student.findOne({ schoolId, studentId });
     if (!student) {
       return res.status(404).json({ error: 'Student not found', code: 'NOT_FOUND' });
     }
 
-    const totalAmount = installments.reduce((sum, inst) => sum + inst.amount, 0);
+    const totalAmount = normalizedInstallments.reduce((sum, installment) => sum.plus(installment.amount), new Decimal(0));
 
     const plan = await PaymentPlan.create({
       schoolId,
       studentId,
-      totalAmount,
-      installments: installments.map(inst => ({
-        amount: inst.amount,
+      totalAmount: totalAmount.toNumber(),
+      installments: normalizedInstallments.map(inst => ({
+        amount: inst.amount.toNumber(),
         dueDate: new Date(inst.dueDate),
         paid: false,
         paidAmount: 0,
@@ -40,7 +55,7 @@ async function createPaymentPlan(req, res, next) {
         performedBy: req.auditContext.performedBy,
         targetId: studentId,
         targetType: 'payment_plan',
-        details: { totalAmount, installmentCount: installments.length },
+        details: { totalAmount: totalAmount.toString(), installmentCount: installments.length },
         result: 'success',
         ipAddress: req.auditContext.ipAddress,
         userAgent: req.auditContext.userAgent,
@@ -85,8 +100,12 @@ async function updateInstallmentStatus(req, res, next) {
     }
 
     const installment = plan.installments[installmentIndex];
+    const normalizedAmount = validateDecimalAmount(paidAmount ?? installment.amount, { currency: 'XLM', minValue: 0 });
+    if (!normalizedAmount.ok) {
+      return res.status(400).json({ error: normalizedAmount.error, code: normalizedAmount.code, field: 'paidAmount' });
+    }
     installment.paid = paid;
-    installment.paidAmount = paidAmount || installment.amount;
+    installment.paidAmount = normalizedAmount.value.toNumber();
     if (paid) {
       installment.paidAt = new Date();
     }

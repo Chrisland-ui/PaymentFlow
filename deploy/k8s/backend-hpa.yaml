@@ -1,7 +1,24 @@
+# HorizontalPodAutoscaler for the backend API server.
+#
+# Sizing rationale — see deploy/k8s/RESOURCE_SIZING.md for full profiling data.
+#
+# Scale-out triggers:
+#   CPU   ≥ 70 % average across pods  (P99 observed ~650 m under load; limit 1 000 m)
+#   Memory ≥ 80 % average across pods (P99 observed ~380 Mi under load; limit  512 Mi)
+#
+# Min replicas: 2 — matches backend-pdb.yaml's minAvailable: 1 so a single
+#   pod can be disrupted voluntarily without taking the service offline.
+# Max replicas: 10 — sized for peak load (10× baseline throughput) while
+#   keeping the MongoDB connection pool within manageable bounds (~200 conns).
+#
+# stabilizationWindowSeconds on scale-down (300 s) prevents thrashing when
+# traffic is bursty — consistent with Kubernetes autoscaling best practices.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: backend
+  labels:
+    app: backend
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
@@ -9,10 +26,56 @@ spec:
     name: backend
   minReplicas: 2
   maxReplicas: 10
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      selectPolicy: Max
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      selectPolicy: Min
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
   metrics:
+    # CPU: scale out when average utilisation exceeds 70 % of the pod's CPU request.
+    # Keeps headroom for payment-processing spikes without over-provisioning at idle.
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
           averageUtilization: 70
+    # Memory: scale out when average utilisation exceeds 80 % of the pod's memory request.
+    # Node.js heap growth during large report generation or BullMQ job bursts triggers
+    # this before OOM-kill; a new pod absorbs traffic while the original finishes draining.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      # Wait 5 minutes before scaling down to avoid thrashing under bursty traffic
+      # (e.g., batch payment syncs followed by a quiet period).
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleUp:
+      # Scale up aggressively on demand — add up to 2 pods per 30 s to handle
+      # sudden spikes (post-school-event payment bursts).
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30

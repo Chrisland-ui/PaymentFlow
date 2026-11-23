@@ -1,0 +1,11 @@
+{
+  "description": "Approved major-version mismatches between workspace package.json files. Each entry suppresses exactly one expected drift violation in check-version-drift.js. The 'reason' field is mandatory and must justify why the divergence is intentional and safe.",
+  "exceptions": [
+    {
+      "package": "eslint",
+      "aLabel": "backend",
+      "bLabel": "frontend",
+      "reason": "ESLint major versions intentionally differ: the backend uses ESLint 9 with the new flat-config format (eslint.config.js), while the frontend uses ESLint 8 with the legacy .eslintrc.json format required by eslint-config-next. Upgrading the frontend to ESLint 9 requires waiting for eslint-config-next to publish an ESLint 9-compatible release. This is a dev-only tooling divergence — there is no shared runtime impact."
+    }
+  ]
+}

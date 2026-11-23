@@ -1,0 +1,31 @@
+{
+  "id": "scenario-10-missing-memo-no-student-match",
+  "description": "On-chain payment has no memo — cannot match to any student. Reconciliation should record as orphaned payment and surface it in the admin dashboard for manual resolution.",
+  "contractState": {
+    "txHash": "aabbcc000000000000000000000000000000000000000000000000000000000a",
+    "status": "confirmed",
+    "amount": "80.0000000",
+    "asset": "XLM",
+    "from": "GPARENT0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "to":   "GSCHOOL1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "memo": null,
+    "memoType": null,
+    "ledger": 1100,
+    "createdAt": "2026-10-10T17:00:00.000Z"
+  },
+  "backendState": {
+    "txHash": "aabbcc000000000000000000000000000000000000000000000000000000000a",
+    "status": "failed",
+    "errorCode": "MISSING_MEMO",
+    "amount": 80,
+    "studentId": null,
+    "confirmedAt": null
+  },
+  "expectedOutcome": {
+    "action": "none",
+    "finalBackendStatus": "failed",
+    "divergence": false,
+    "divergenceType": "missing_memo",
+    "adminActionRequired": true
+  }
+}

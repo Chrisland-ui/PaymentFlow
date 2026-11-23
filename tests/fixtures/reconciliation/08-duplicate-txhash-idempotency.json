@@ -1,0 +1,33 @@
+{
+  "id": "scenario-08-duplicate-txhash-idempotency",
+  "description": "The same transaction hash appears twice in the event stream (Horizon re-delivery). Reconciliation must treat the second occurrence as a duplicate and not double-credit the student.",
+  "contractState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000008",
+    "status": "confirmed",
+    "amount": "120.0000000",
+    "asset": "XLM",
+    "from": "GPARENT8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "to":   "GSCHOOL1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "memo": "STU008",
+    "ledger": 1080,
+    "createdAt": "2026-10-08T15:00:00.000Z"
+  },
+  "backendState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000008",
+    "status": "confirmed",
+    "amount": 120,
+    "studentId": "STU008",
+    "confirmedAt": "2026-10-08T15:00:07.000Z",
+    "idempotencyKey": "verify-STU008-aabbcc00"
+  },
+  "incomingDuplicateEvent": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000008",
+    "source": "horizon-re-delivery"
+  },
+  "expectedOutcome": {
+    "action": "skip",
+    "finalBackendStatus": "confirmed",
+    "divergence": false,
+    "divergenceType": "duplicate_ignored"
+  }
+}

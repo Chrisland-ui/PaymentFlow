@@ -1,0 +1,95 @@
+groups:
+  - name: resource_limits
+    interval: 30s
+    rules:
+      # ── Backend memory ───────────────────────────────────────────────────────
+      # Limit: 512Mi. Alert at 80% (410Mi) warning, 90% (460Mi) critical.
+      - alert: BackendMemoryHigh
+        expr: |
+          container_memory_working_set_bytes{container="backend"}
+            / (512 * 1024 * 1024) > 0.80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend memory above 80% of limit"
+          description: >
+            Backend pod {{ $labels.pod }} is using {{ $value | humanizePercentage }}
+            of its 512Mi memory limit. Investigate heap growth or scale the deployment.
+
+      - alert: BackendMemoryCritical
+        expr: |
+          container_memory_working_set_bytes{container="backend"}
+            / (512 * 1024 * 1024) > 0.90
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backend memory above 90% of limit — OOM kill imminent"
+          description: >
+            Backend pod {{ $labels.pod }} is using {{ $value | humanizePercentage }}
+            of its 512Mi memory limit. OOM kill may occur. Review docs/k8s-resource-sizing.md.
+
+      # ── Frontend memory ──────────────────────────────────────────────────────
+      # Limit: 384Mi. Alert at 80% (307Mi) warning, 90% (345Mi) critical.
+      - alert: FrontendMemoryHigh
+        expr: |
+          container_memory_working_set_bytes{container="frontend"}
+            / (384 * 1024 * 1024) > 0.80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frontend memory above 80% of limit"
+          description: >
+            Frontend pod {{ $labels.pod }} is using {{ $value | humanizePercentage }}
+            of its 384Mi memory limit.
+
+      # ── Redis memory ─────────────────────────────────────────────────────────
+      # Limit: 256Mi. Alert at 80% (204Mi).
+      - alert: RedisMemoryHigh
+        expr: |
+          container_memory_working_set_bytes{container="redis"}
+            / (256 * 1024 * 1024) > 0.80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis memory above 80% of limit"
+          description: >
+            Redis pod {{ $labels.pod }} memory is {{ $value | humanizePercentage }}
+            of its 256Mi limit. Check queue depth and eviction policy.
+
+      # ── MongoDB memory ───────────────────────────────────────────────────────
+      # Limit: 1Gi. Alert at 80% (819Mi).
+      - alert: MongoDBMemoryHigh
+        expr: |
+          container_memory_working_set_bytes{container="mongodb"}
+            / (1024 * 1024 * 1024) > 0.80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MongoDB memory above 80% of limit"
+          description: >
+            MongoDB pod {{ $labels.pod }} is using {{ $value | humanizePercentage }}
+            of its 1Gi memory limit. WiredTiger cache pressure may affect query performance.
+
+      # ── CPU throttling ───────────────────────────────────────────────────────
+      # Alert if any payment-critical container is being CPU-throttled > 50% of
+      # its scheduled time (throttled_seconds / (throttled_seconds + run_seconds)).
+      - alert: BackendCPUThrottled
+        expr: |
+          rate(container_cpu_cfs_throttled_seconds_total{container="backend"}[5m])
+            / (rate(container_cpu_cfs_throttled_seconds_total{container="backend"}[5m])
+               + rate(container_cpu_cfs_periods_total{container="backend"}[5m]) + 0.001)
+            > 0.50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend CPU throttled > 50%"
+          description: >
+            Backend pod {{ $labels.pod }} is being CPU-throttled.
+            Consider raising the CPU limit or scaling out via the HPA.
+            See docs/k8s-resource-sizing.md.

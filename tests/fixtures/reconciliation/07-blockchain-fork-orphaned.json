@@ -1,0 +1,22 @@
+{
+  "id": "scenario-07-blockchain-fork-orphaned",
+  "description": "Transaction was briefly visible during a fork but became an orphan — Horizon returns 404, backend still shows pending. Reconciliation must mark as failed after the stale threshold.",
+  "contractState": null,
+  "backendState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000007",
+    "status": "pending",
+    "amount": 200,
+    "studentId": "STU007",
+    "confirmedAt": null,
+    "createdAt": "2026-10-07T06:00:00.000Z",
+    "updatedAt": "2026-10-07T06:00:00.000Z"
+  },
+  "staleThresholdMs": 300000,
+  "expectedOutcome": {
+    "action": "expire",
+    "finalBackendStatus": "failed",
+    "divergence": true,
+    "divergenceType": "orphaned_transaction",
+    "alertRequired": false
+  }
+}

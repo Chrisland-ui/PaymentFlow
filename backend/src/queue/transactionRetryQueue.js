@@ -67,6 +67,7 @@ let transactionRetryQueue = null;
 let deadLetterQueue = null;
 let queueEvents = null;
 let retryWorker = null;
+let dlqPruneTimer = null;
 
 // Job state tracking for monitoring
 const jobMetrics = {
@@ -125,7 +126,7 @@ function createTransactionRetryQueue() {
           age: 3600, // Keep completed jobs for 1 hour
           count: 1000, // Keep last 1000 completed jobs
         },
-        removeOnFail: false, // Keep failed jobs for analysis
+        removeOnFail: { age: 7 * 24 * 60 * 60, count: 10000 },
         jobId: null, // Auto-generate job IDs
       },
     });
@@ -147,14 +148,46 @@ function createDeadLetterQueue() {
       defaultJobOptions: {
         attempts: 1, // No retries for dead-lettered jobs
         removeOnComplete: {
-          age: config.dlq.maxAge, // Keep for configured period
+          age: Math.floor(config.dlq.maxAge / 1000),
           count: 10000, // Keep last 10000 dead-lettered jobs
         },
-        removeOnFail: false, // Never remove failed dead-letter jobs
+        removeOnFail: { age: Math.floor(config.dlq.maxAge / 1000), count: 10000 },
       },
     });
   }
   return deadLetterQueue;
+}
+
+async function pruneDeadLetterJobs() {
+  const dlq = createDeadLetterQueue();
+  if (!dlq) return 0;
+  const cutoff = Date.now() - config.dlq.maxAge;
+  let removed = 0;
+  let start = 0;
+  const batchSize = 500;
+  while (true) {
+    const jobs = await dlq.getJobs(['waiting', 'delayed', 'failed', 'paused'], start, start + batchSize - 1);
+    if (!jobs.length) break;
+    const expired = jobs.filter((job) => (Date.parse(job.data.failedAt || '') || job.timestamp) < cutoff);
+    if (expired.length) {
+      await Promise.all(expired.map((job) => job.remove()));
+      removed += expired.length;
+      continue;
+    }
+    if (jobs.length < batchSize) break;
+    start += jobs.length;
+  }
+  return removed;
+}
+
+function startDeadLetterPruner() {
+  if (dlqPruneTimer) return;
+  const run = () => pruneDeadLetterJobs()
+    .then((removed) => { if (removed) logger.info('Pruned expired dead-letter jobs', { removed }); })
+    .catch((error) => logger.error('Failed to prune dead-letter jobs', { error: error.message }));
+  run();
+  dlqPruneTimer = setInterval(run, 60 * 60 * 1000);
+  dlqPruneTimer.unref();
 }
 
 /**
@@ -211,6 +244,40 @@ function logEvent(eventType, data) {
 }
 
 /**
+ * Deeply sanitizes job payload to prevent sensitive data leakage.
+ * Redacts secret keys, auth tokens, passwords, private keys, and sensitive PII.
+ */
+function sanitizeJobPayload(data) {
+  if (!data || typeof data !== 'object') return data;
+  if (Array.isArray(data)) return data.map(sanitizeJobPayload);
+
+  const sensitiveKeyRegex = /password|secret|token|credential|private|auth|jwt|seed/i;
+  const stellarSecretRegex = /^S[A-Z2-7]{55}$/;
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  const sanitized = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (sensitiveKeyRegex.test(key)) {
+      sanitized[key] = '[REDACTED]';
+    } else if (typeof value === 'string') {
+      if (stellarSecretRegex.test(value)) {
+        sanitized[key] = '[REDACTED]';
+      } else if (emailRegex.test(value)) {
+        const [local, domain] = value.split('@');
+        sanitized[key] = `${local.slice(0, 2)}***@${domain}`;
+      } else {
+        sanitized[key] = value;
+      }
+    } else if (typeof value === 'object' && value !== null) {
+      sanitized[key] = sanitizeJobPayload(value);
+    } else {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
+}
+
+/**
  * Move failed job to dead-letter queue
  */
 async function moveToDeadLetterQueue(job, error) {
@@ -222,6 +289,28 @@ async function moveToDeadLetterQueue(job, error) {
     });
     return;
   }
+
+  const { resolveCorrelationId } = require('../utils/correlationId');
+  const correlationId =
+    job.data?.correlationId ||
+    job.data?.metadata?.correlationId ||
+    resolveCorrelationId(null, job.data?.transactionHash);
+
+  const attemptHistory = Array.isArray(job.data?.attemptHistory)
+    ? [...job.data.attemptHistory]
+    : [];
+
+  const currentAttempt = (job.attemptsMade || 0) + 1;
+  if (!attemptHistory.some((a) => a.attemptNumber === currentAttempt)) {
+    attemptHistory.push({
+      attemptNumber: currentAttempt,
+      attemptedAt: new Date().toISOString(),
+      error: error?.message || 'Unknown error',
+      errorCode: error?.code || 'UNKNOWN',
+    });
+  }
+
+  const safePayload = sanitizeJobPayload(job.data || {});
   
   try {
     const dlq = createDeadLetterQueue();
@@ -230,10 +319,12 @@ async function moveToDeadLetterQueue(job, error) {
       originalQueue: QUEUE_NAMES.TRANSACTION_RETRY,
       transactionHash: job.data.transactionHash,
       studentId: job.data.studentId,
-      error: error.message,
-      errorCode: error.code,
-      failedAttempts: job.attemptsMade,
-      originalJobData: job.data,
+      correlationId,
+      failureReason: error.message || 'Maximum retry attempts exhausted',
+      failureCode: error.code || 'UNKNOWN',
+      failedAttempts: currentAttempt,
+      attemptHistory,
+      safePayload,
       failedAt: new Date().toISOString(),
     });
     
@@ -241,9 +332,32 @@ async function moveToDeadLetterQueue(job, error) {
     logEvent('JOB_MOVED_TO_DLQ', {
       jobId: job.id,
       transactionHash: job.data.transactionHash,
-      attempts: job.attemptsMade,
+      correlationId,
+      attempts: currentAttempt,
       error: error.message,
     });
+
+    // Also persist to MongoDB PendingVerification for auditability and recovery
+    try {
+      const PendingVerification = require('../models/pendingVerificationModel');
+      await PendingVerification.findOneAndUpdate(
+        { txHash: job.data.transactionHash },
+        {
+          $set: {
+            status: 'dead_letter',
+            correlationId,
+            lastError: error.message,
+            failureReason: error.message,
+            failureCode: error.code || 'UNKNOWN',
+            attemptHistory,
+            safePayload,
+          },
+        },
+        { _bypassTenantScope: true }
+      );
+    } catch (mongoErr) {
+      console.error('[TransactionRetryQueue] Failed to update PendingVerification for DLQ:', mongoErr.message);
+    }
   } catch (dlqError) {
     console.error('[TransactionRetryQueue] Failed to move job to DLQ:', dlqError.message);
     logEvent('DLQ_MOVE_ERROR', {
@@ -329,6 +443,14 @@ async function processTransactionRetryJob(job) {
     };
     
   } catch (error) {
+    if (!job.data.attemptHistory) job.data.attemptHistory = [];
+    job.data.attemptHistory.push({
+      attemptNumber: (job.attemptsMade || 0) + 1,
+      attemptedAt: new Date().toISOString(),
+      error: error?.message || 'Unknown error',
+      errorCode: error?.code || 'UNKNOWN',
+    });
+
     const isPermanentError = require('../services/retryContract').isPermanent(error);
     const hasReachedMaxAttempts = job.attemptsMade >= config.retry.maxAttempts - 1;
     
@@ -517,7 +639,8 @@ async function addTransactionToRetryQueue(transactionHash, studentId = null, met
       backoff: {
         type: 'custom',
       },
-      delay: config.retry.initialDelay, // Initial delay before first retry
+      delay: metadata.replayedFromDLQ ? 0 : config.retry.initialDelay,
+      ...(metadata.priority ? { priority: metadata.priority } : {}),
     });
     
     logEvent('JOB_ADDED', {
@@ -629,6 +752,10 @@ async function getDLQStats() {
  */
 async function shutdownQueue() {
   console.log('[TransactionRetryQueue] Shutting down...');
+  if (dlqPruneTimer) {
+    clearInterval(dlqPruneTimer);
+    dlqPruneTimer = null;
+  }
   
   try {
     if (retryWorker) {
@@ -676,6 +803,7 @@ async function initializeQueue() {
     // Create queues
     createTransactionRetryQueue();
     createDeadLetterQueue();
+    startDeadLetterPruner();
     
     // Set up event listeners
     setupEventListeners();
@@ -708,6 +836,11 @@ module.exports = {
   addTransactionToRetryQueue,
   getQueueStats,
   getDLQStats,
+  createDeadLetterQueue,
+  getDeadLetterQueue: () => deadLetterQueue || createDeadLetterQueue(),
+  sanitizeJobPayload,
+  moveToDeadLetterQueue,
+  pruneDeadLetterJobs,
   calculateBackoffDelay,
   shutdownQueue,
   config,

@@ -7,6 +7,8 @@ const csv = require('csv-parser');
 const { Readable } = require('stream');
 const { logAudit } = require('../services/auditService');
 const { encryptStudentPii, decryptStudentPii, hashParentEmail } = require('../services/studentPiiEncryption');
+const { encodeListCursor, decodeListCursor, cursorCondition } = require('../utils/listCursor');
+const { validateDecimalAmount } = require('../utils/decimalPrecision');
 
 async function registerStudent(req, res, next) {
   // Declared in the function scope (not inside try) so the 11000 duplicate-key
@@ -151,8 +153,6 @@ async function getAllStudents(req, res, next) {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.max(1, parseInt(req.query.limit, 10) || 50);
-    const skip = (page - 1) * limit;
-
     const filter = { schoolId: req.schoolId };
 
     if (req.query.class) {
@@ -180,13 +180,50 @@ async function getAllStudents(req, res, next) {
       filter.$or = [{ name: re }, { studentId: re }];
     }
 
-    const [students, total] = await Promise.all([
-      Student.find(filter, req.admin ? {} : { walletAddress: 0, contactEmail: 0, parentPhone: 0 }).sort({ createdAt: -1 }).skip(skip).limit(limit),
-      Student.countDocuments(filter),
-    ]);
+    const legacyOffset = req.legacyOffsetPagination && !req.query.cursor;
+    let students;
+    let pagination;
 
-    res.json({ students, total, page, pages: Math.ceil(total / limit) });
+    if (legacyOffset) {
+      const skip = (page - 1) * limit;
+      const [offsetStudents, total] = await Promise.all([
+        Student.find(filter, req.admin ? {} : { walletAddress: 0, contactEmail: 0, parentPhone: 0 })
+          .sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit),
+        Student.countDocuments(filter),
+      ]);
+      students = offsetStudents;
+      pagination = { page, limit, total, pages: Math.ceil(total / limit), hasNext: page < Math.ceil(total / limit), hasPrev: page > 1 };
+    } else {
+      const cursorFilters = {
+        schoolId: req.schoolId,
+        class: req.query.class || null,
+        status: req.query.status || null,
+        search: req.query.search || null,
+      };
+      const cursorPayload = req.query.cursor ? decodeListCursor(req.query.cursor, cursorFilters) : null;
+      const cursorFilter = cursorPayload
+        ? { $and: [filter, cursorCondition(cursorPayload)] }
+        : filter;
+      const results = await Student.find(cursorFilter, req.admin ? {} : { walletAddress: 0, contactEmail: 0, parentPhone: 0 })
+        .sort({ createdAt: -1, _id: -1 })
+        .limit(limit + 1);
+      const hasNextPage = results.length > limit;
+      students = results.slice(0, limit);
+      pagination = {
+        limit,
+        nextCursor: hasNextPage && students.length
+          ? encodeListCursor(students[students.length - 1], cursorFilters)
+          : null,
+        hasPreviousPage: Boolean(cursorPayload),
+        hasNextPage,
+      };
+    }
+
+    res.json({ students, pagination });
   } catch (err) {
+    if (err.code === 'INVALID_CURSOR') {
+      return res.status(400).json({ error: err.message, code: 'INVALID_CURSOR' });
+    }
     next(err);
   }
 }
@@ -215,6 +252,8 @@ async function deleteStudent(req, res, next) {
       return next(err);
     }
 
+    const before = student.toObject();
+
     // Perform soft delete — set deletedAt timestamp instead of removing the document
     await student.softDelete();
 
@@ -234,7 +273,9 @@ async function deleteStudent(req, res, next) {
       performedBy: req.auditContext?.performedBy ?? 'unknown',
       targetId: studentId,
       targetType: 'student',
-      details: { name: student.name, class: student.class, deletedAt: student.deletedAt },
+      details: { before, after: { studentId, deletedAt: student.deletedAt } },
+      before,
+      after: { studentId, deletedAt: student.deletedAt },
       result: 'success',
       ipAddress: req.auditContext?.ipAddress ?? null,
       userAgent: req.auditContext?.userAgent ?? null,
@@ -274,6 +315,7 @@ async function restoreStudent(req, res, next) {
       return next(err);
     }
 
+    const before = student.toObject();
     const previousDeletedAt = student.deletedAt;
 
     // Restore the student — clears deletedAt via the softDelete utility
@@ -294,7 +336,9 @@ async function restoreStudent(req, res, next) {
       performedBy: req.auditContext?.performedBy ?? 'unknown',
       targetId: studentId,
       targetType: 'student',
-      details: { name: student.name, class: student.class, previousDeletedAt },
+      details: { before, after: { studentId, deletedAt: null } },
+      before,
+      after: { studentId, deletedAt: null },
       result: 'success',
       ipAddress: req.auditContext?.ipAddress ?? null,
       userAgent: req.auditContext?.userAgent ?? null,
@@ -371,7 +415,7 @@ async function getDeletedStudentPayments(req, res, next) {
 async function updateStudent(req, res, next) {
   try {
     const { studentId } = req.params;
-    const { name, class: className, feeAmount, reminderOptOut } = req.body;
+    const { name, class: className, feeAmount, reminderOptOut, graduatedAt } = req.body;
 
     const original = await Student.findOne({ schoolId: req.schoolId, studentId }).lean();
     if (!original) {
@@ -397,8 +441,13 @@ async function updateStudent(req, res, next) {
         update.feeAmount = feeStructure.feeAmount;
       }
     }
-    if (feeAmount !== undefined) update.feeAmount = feeAmount;
+    if (feeAmount !== undefined) {
+      const amount = validateDecimalAmount(feeAmount, { minValue: 0.01 });
+      if (!amount.ok) return res.status(400).json({ error: amount.error, code: amount.code });
+      update.feeAmount = amount.value.toNumber();
+    }
     if (reminderOptOut !== undefined) update.reminderOptOut = Boolean(reminderOptOut);
+    if (graduatedAt !== undefined) update.graduatedAt = graduatedAt;
 
     const student = await Student.findOneAndUpdate(
       { schoolId: req.schoolId, studentId },
@@ -598,10 +647,10 @@ function validateStudentRow(row) {
 
   // feeAmount: optional, but if provided must be a positive number
   if (row.feeAmount != null && row.feeAmount !== '') {
-    const n = Number(row.feeAmount);
-    if (!Number.isFinite(n) || n <= 0) {
-      errors.push('feeAmount must be a positive number');
-      fieldErrors.push({ field: 'feeAmount', error: 'feeAmount must be a positive number' });
+    const amount = validateDecimalAmount(row.feeAmount, { minValue: 0.01 });
+    if (!amount.ok) {
+      errors.push(amount.error);
+      fieldErrors.push({ field: 'feeAmount', error: amount.error });
     }
   }
 
@@ -612,6 +661,46 @@ function validateStudentRow(row) {
 async function bulkImportStudents(req, res, next) {
   try {
     const { schoolId } = req;
+    if (req.csvFileId) {
+      if (!req.csvRowCount) {
+        const mongoose = require('mongoose');
+        const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'studentImports' });
+        await bucket.delete(req.csvFileId).catch(() => {});
+        return res.status(400).json({ error: 'No student records found in input', code: 'VALIDATION_ERROR' });
+      }
+
+      const ImportJob = require('../models/importJobModel');
+      const { enqueueStudentImport } = require('../queue/studentImportQueue');
+      const jobId = require('crypto').randomUUID();
+      await ImportJob.create({ jobId, schoolId, totalRows: req.csvRowCount, status: 'pending' });
+
+      try {
+        await enqueueStudentImport({ jobId, schoolId, fileId: String(req.csvFileId) });
+      } catch (queueError) {
+        await ImportJob.updateOne({ jobId }, { status: 'failed', completedAt: new Date(), failureReason: queueError.message });
+        const mongoose = require('mongoose');
+        const bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'studentImports' });
+        await bucket.delete(req.csvFileId).catch(() => {});
+        return res.status(503).json({ error: 'Student import queue is unavailable', code: 'QUEUE_UNAVAILABLE' });
+      }
+
+      if (req.auditContext) {
+        await logAudit({
+          schoolId,
+          action: 'student_bulk_import',
+          performedBy: req.auditContext.performedBy,
+          targetId: jobId,
+          targetType: 'student_import_job',
+          details: { total: req.csvRowCount, status: 'pending' },
+          result: 'success',
+          ipAddress: req.auditContext.ipAddress,
+          userAgent: req.auditContext.userAgent,
+        });
+      }
+
+      return res.status(202).json({ jobId, status: 'pending', totalRows: req.csvRowCount });
+    }
+
     let rows;
 
     if (req.parsedRows) {

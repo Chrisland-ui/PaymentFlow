@@ -19,3 +19,4 @@ groups:
             10 minutes ({{ $value | printf "%.1%" }}). Memory pressure is high
             and an out-of-memory crash is imminent. Check for memory leaks,
             consider restarting the instance, or increase heap size limits.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#nodeheapusagehigh"

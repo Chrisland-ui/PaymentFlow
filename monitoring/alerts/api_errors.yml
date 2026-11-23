@@ -25,6 +25,7 @@ groups:
             confirmation and processing endpoints. Check application logs and
             the mongodb_connection_state / horizon_circuit_breaker_state
             gauges for a root cause before escalating.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#apiHigh5xxRateWarning"
 
       # ── Critical: fast-burn 5xx spike ─────────────────────────────────────
       # A short (5m), high (20%) ratio catches an acute outage (e.g. a bad
@@ -46,3 +47,4 @@ groups:
             {{ $value | printf "%.1f%%" }} of requests have returned a 5xx
             status over the last 5 minutes. This is very likely an active
             incident on the payment-processing path. Page on-call.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#apiHigh5xxRateCritical"

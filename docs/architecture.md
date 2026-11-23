@@ -220,6 +220,10 @@ stateDiagram-v2
 
 Forward jumps that skip intermediate states are allowed (e.g. a payment first observed already past `CONFIRMATION_THRESHOLD` goes straight from `detected` to `confirmed`). `finalized` and `failed` have no outgoing transitions, and re-computing a target state that doesn't outrank the current state is a no-op — see `resolveNextState()` and the transition table (`CONFIRMATION_STATE_TRANSITIONS`) for the enforced source of truth.
 
+### Payment record status transitions
+
+The persisted payment `status` is separate from `confirmationState` and is changed only through `backend/src/services/paymentTransitionService.js`. Normal transitions are `PENDING → SUBMITTED → SUCCESS`, with failure exits from each active state; `SUCCESS` can become `DISPUTED`, `REFUNDED`, or `FAILED`. Admin-authorized dispute resolution can transition `DISPUTED → SUCCESS` or `DISPUTED → REFUNDED`. The service validates against `backend/src/constants/paymentStatus.js`, serializes writes in a MongoDB transaction, and commits the audit entry with the status update.
+
 ---
 
 ## Backend Services

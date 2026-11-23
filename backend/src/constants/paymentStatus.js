@@ -45,16 +45,19 @@ const PAYMENT_STATUS_VALUES = Object.freeze(Object.values(PAYMENT_STATUS));
  *   SUCCESS   → DISPUTED  : admin marks a confirmed payment as disputed
  *   SUCCESS   → REFUNDED  : admin marks a confirmed payment as refunded
  *   PENDING   → FAILED    : admin manually fails a stuck pending payment
- *   SUBMITTED → FAILED    : admin manually fails a stuck submitted payment
+ *   SUBMITTED → SUCCESS   : ledger-finality polling confirms the transaction
+ *                           (see stellarService.pollForLedgerInclusion)
+ *   SUBMITTED → FAILED    : ledger-finality polling times out (FINALITY_TIMEOUT)
+ *                           or the transaction fails on-chain after submission
  *
  * All other transitions are rejected. Callers with admin authority can use
  * ADMIN_PAYMENT_STATUS_TRANSITIONS (see below) after setting
  * payment.$locals.adminOverride = true.
  */
 const PAYMENT_STATUS_TRANSITIONS = Object.freeze({
-  [PAYMENT_STATUS.SUCCESS]:   [PAYMENT_STATUS.DISPUTED, PAYMENT_STATUS.REFUNDED],
-  [PAYMENT_STATUS.PENDING]:   [PAYMENT_STATUS.FAILED],
-  [PAYMENT_STATUS.SUBMITTED]: [PAYMENT_STATUS.FAILED],
+  [PAYMENT_STATUS.SUCCESS]:   [PAYMENT_STATUS.DISPUTED, PAYMENT_STATUS.REFUNDED, PAYMENT_STATUS.FAILED],
+  [PAYMENT_STATUS.PENDING]:   [PAYMENT_STATUS.SUBMITTED, PAYMENT_STATUS.FAILED],
+  [PAYMENT_STATUS.SUBMITTED]: [PAYMENT_STATUS.SUCCESS, PAYMENT_STATUS.FAILED],
 });
 
 /**
@@ -71,12 +74,15 @@ const PAYMENT_STATUS_TRANSITIONS = Object.freeze({
  *   FAILED   → DISPUTED  : admin escalates a wrongly-failed payment for
  *                          investigation rather than confirming it outright —
  *                          Issue #1029
+ *   SUBMITTED → SUCCESS  : admin manually confirms a stuck SUBMITTED payment
+ *                          after manual on-chain verification
+ *   SUBMITTED → FAILED   : admin manually fails a stuck SUBMITTED payment
  */
 const ADMIN_PAYMENT_STATUS_TRANSITIONS = Object.freeze({
-  [PAYMENT_STATUS.SUCCESS]:   [PAYMENT_STATUS.DISPUTED, PAYMENT_STATUS.REFUNDED],
-  [PAYMENT_STATUS.PENDING]:   [PAYMENT_STATUS.FAILED],
-  [PAYMENT_STATUS.SUBMITTED]: [PAYMENT_STATUS.FAILED],
-  [PAYMENT_STATUS.DISPUTED]:  [PAYMENT_STATUS.REFUNDED],
+  [PAYMENT_STATUS.SUCCESS]:   [PAYMENT_STATUS.DISPUTED, PAYMENT_STATUS.REFUNDED, PAYMENT_STATUS.FAILED],
+  [PAYMENT_STATUS.PENDING]:   [PAYMENT_STATUS.SUBMITTED, PAYMENT_STATUS.FAILED],
+  [PAYMENT_STATUS.SUBMITTED]: [PAYMENT_STATUS.SUCCESS, PAYMENT_STATUS.FAILED],
+  [PAYMENT_STATUS.DISPUTED]:  [PAYMENT_STATUS.SUCCESS, PAYMENT_STATUS.REFUNDED, PAYMENT_STATUS.FAILED],
   [PAYMENT_STATUS.FAILED]:    [PAYMENT_STATUS.SUCCESS, PAYMENT_STATUS.DISPUTED],
 });
 
@@ -96,10 +102,33 @@ function isTransitionAllowed(from, to, adminOverride = false) {
   return allowed.includes(to);
 }
 
+/**
+ * Canonical failure reason codes for payments that transition to FAILED.
+ *
+ * These are stored in `payment.suspicionReason` (re-used as a general
+ * failure-reason field) and exposed in API responses so clients can
+ * distinguish permanent failures from transient ones.
+ *
+ * FINALITY_TIMEOUT  — A SUBMITTED transaction was not observed in a closed
+ *                     ledger within FINALITY_POLL_TIMEOUT_MS. The transaction
+ *                     may still confirm later; operators should investigate
+ *                     via the Stellar Horizon API using the tx hash.
+ *                     See: docs/stellar-finality-policy.md
+ * TX_FAILED_ON_CHAIN — Horizon confirmed the tx was included in a ledger but
+ *                      `successful === false` (e.g. op_bad_auth, op_no_trust).
+ * STELLAR_NETWORK_ERROR — Horizon was unreachable for the full polling window.
+ */
+const PAYMENT_FAILURE_REASONS = Object.freeze({
+  FINALITY_TIMEOUT: 'FINALITY_TIMEOUT',
+  TX_FAILED_ON_CHAIN: 'TX_FAILED_ON_CHAIN',
+  STELLAR_NETWORK_ERROR: 'STELLAR_NETWORK_ERROR',
+});
+
 module.exports = {
   PAYMENT_STATUS,
   PAYMENT_STATUS_VALUES,
   PAYMENT_STATUS_TRANSITIONS,
   ADMIN_PAYMENT_STATUS_TRANSITIONS,
+  PAYMENT_FAILURE_REASONS,
   isTransitionAllowed,
 };

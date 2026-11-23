@@ -1,0 +1,23 @@
+{
+  "id": "scenario-05-event-missed",
+  "description": "Transaction confirmed on-chain but the backend has no record at all — reconciliation must create the payment record and trigger normal post-confirmation processing.",
+  "contractState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000005",
+    "status": "confirmed",
+    "amount": "100.0000000",
+    "asset": "XLM",
+    "from": "GPARENT5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "to":   "GSCHOOL1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "memo": "STU005",
+    "ledger": 1050,
+    "createdAt": "2026-10-05T12:00:00.000Z"
+  },
+  "backendState": null,
+  "expectedOutcome": {
+    "action": "create",
+    "finalBackendStatus": "confirmed",
+    "divergence": true,
+    "divergenceType": "missing_in_backend",
+    "alertRequired": false
+  }
+}

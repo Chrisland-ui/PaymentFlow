@@ -92,8 +92,39 @@ async function listEndpoints(req, res, next) {
     const schoolId = _callerSchoolId(req);
     if (!schoolId) return res.status(400).json({ error: 'schoolId required', code: 'MISSING_SCHOOL_ID' });
 
-    const endpoints = await WebhookEndpoint.find({ schoolId }).sort({ createdAt: -1 }).lean();
-    return res.json({ endpoints });
+    const endpoints = await WebhookEndpoint.find({ schoolId }).select('-secret').sort({ createdAt: -1 }).lean();
+    const endpointIds = endpoints.map((endpoint) => endpoint._id);
+    const deliveryStats = endpointIds.length
+      ? await WebhookDelivery.aggregate([
+        { $match: { schoolId, endpointId: { $in: endpointIds }, createdAt: { $gte: new Date(Date.now() - 30 * 86400000) } } },
+        {
+          $group: {
+            _id: '$endpointId',
+            attempts: { $sum: 1 },
+            successes: { $sum: { $cond: ['$success', 1, 0] } },
+            lastDeliveryAt: { $max: '$createdAt' },
+            lastSuccessAt: { $max: { $cond: ['$success', '$createdAt', null] } },
+            lastFailureAt: { $max: { $cond: ['$success', null, '$createdAt'] } },
+          },
+        },
+      ])
+      : [];
+    const statsByEndpoint = new Map(deliveryStats.map((stats) => [String(stats._id), stats]));
+    const withHealth = endpoints.map((endpoint) => {
+      const stats = statsByEndpoint.get(String(endpoint._id));
+      return {
+        ...endpoint,
+        deliveryStats: {
+          attempts: stats?.attempts || 0,
+          successRate: stats?.attempts ? Math.round((stats.successes / stats.attempts) * 100) : null,
+          lastDeliveryAt: stats?.lastDeliveryAt || null,
+          lastSuccessAt: stats?.lastSuccessAt || endpoint.lastDeliveredAt || null,
+          lastFailureAt: stats?.lastFailureAt || endpoint.lastFailedAt || null,
+          consecutiveFailures: endpoint.consecutiveFailures || 0,
+        },
+      };
+    });
+    return res.json({ endpoints: withHealth });
   } catch (err) {
     next(err);
   }

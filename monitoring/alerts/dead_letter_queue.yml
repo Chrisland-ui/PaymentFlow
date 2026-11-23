@@ -1,0 +1,14 @@
+groups:
+  - name: dead_letter_queue
+    rules:
+      - alert: PaymentDeadLetterQueueDepthHigh
+        expr: queue_failed{queue=~".*-dead-letter"} > 20
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Payment dead-letter queue has exceeded 20 jobs"
+          description: >
+            {{ $value }} payment jobs have exhausted retries and are awaiting
+            operator review. Inspect the admin dead-letter queue and replay or
+            resolve each job after investigating its failure reason.

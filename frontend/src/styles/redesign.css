@@ -298,3 +298,30 @@ h1 { font-size: clamp(1.9rem, 3vw, 2.15rem); }
 .lp-trust-item svg, .lp-feat:hover { border-color: rgba(16,185,129,0.4); }
 .lp-footer-logo { background: linear-gradient(135deg, #34d399, #2dd4bf); }
 .lp-footer-links a:hover { color: #34d399; }
+
+/* ─────────────────────────────────────────────────────────────
+   13 · REDUCED MOTION  (issue #20)
+   Override any redesign-specific animations when the user
+   has indicated they prefer reduced motion.
+───────────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  /* Gradient-shine and shimmer effects on buttons / cards */
+  .btn-cta,
+  .card,
+  .stat-card {
+    transition: none !important;
+  }
+
+  /* Hero heading gradient animation */
+  .lp-hero h1 em {
+    animation: none !important;
+    background-position: 0 0 !important;
+  }
+
+  /* Badge / pill hover scale */
+  .badge,
+  .lp-badge {
+    transition: none !important;
+    transform: none !important;
+  }
+}

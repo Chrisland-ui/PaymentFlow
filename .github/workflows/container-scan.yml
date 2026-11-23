@@ -1,0 +1,133 @@
+name: Container Image Vulnerability Scan
+
+# Scans backend and frontend Docker images for CRITICAL and HIGH CVEs using Trivy.
+# Results are uploaded to the GitHub Security tab (Code scanning alerts) via SARIF.
+#
+# Trigger strategy:
+#   • push / pull_request to main — gate every code change before it ships
+#   • weekly schedule (Monday 03:00 UTC) — catch newly-disclosed CVEs in base images
+#     even when the codebase itself has not changed
+#
+# Severity policy (see docs/container-security.md):
+#   • CRITICAL — blocks the build immediately; fix or add an approved exception
+#   • HIGH     — blocks unless an owner-approved exception exists in security-exceptions.json
+#   • MEDIUM / LOW — tracked in SARIF results but non-blocking
+#
+# Exception process: docs/container-security.md#exception-process
+# False-positive suppression: add a .trivyignore entry (docs/container-security.md#suppressing-false-positives)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly on Monday at 03:00 UTC — staggered to avoid peak-hour runner contention.
+    - cron: '0 3 * * 1'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Backend image scan
+  # ─────────────────────────────────────────────────────────────────────────────
+  scan-backend:
+    name: Scan backend image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build backend Docker image
+        run: docker build -t paymentflow/backend:scan ./backend
+
+      - name: Scan backend image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: paymentflow/backend:scan
+          format: 'sarif'
+          output: 'trivy-backend.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Upload backend SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-backend.sarif'
+          category: 'container-backend'
+
+      - name: Upload backend scan results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-backend-sarif
+          path: trivy-backend.sarif
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Frontend image scan
+  # ─────────────────────────────────────────────────────────────────────────────
+  scan-frontend:
+    name: Scan frontend image
+    runs-on: ubuntu-latest
+
+    env:
+      NEXT_PUBLIC_API_URL: http://localhost:5000/api
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build frontend Docker image
+        run: |
+          docker build \
+            --build-arg NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL}" \
+            -t paymentflow/frontend:scan \
+            ./frontend
+
+      - name: Scan frontend image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: paymentflow/frontend:scan
+          format: 'sarif'
+          output: 'trivy-frontend.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Upload frontend SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-frontend.sarif'
+          category: 'container-frontend'
+
+      - name: Upload frontend scan results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-frontend-sarif
+          path: trivy-frontend.sarif
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Gate job — used as a single required status check for branch protection.
+  # Add "scan-gate" to the required status checks in the repository settings
+  # rather than adding each individual scan job separately.
+  # ─────────────────────────────────────────────────────────────────────────────
+  scan-gate:
+    name: Container scan gate
+    runs-on: ubuntu-latest
+    needs: [scan-backend, scan-frontend]
+
+    steps:
+      - name: All container scans passed
+        run: echo "Backend and frontend container scans completed with no CRITICAL or HIGH unfixed CVEs."

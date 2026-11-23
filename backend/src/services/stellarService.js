@@ -1126,6 +1126,180 @@ async function parseIncomingTransaction(txHash, walletAddress = null) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Ledger finality polling (new for SUBMITTED → SUCCESS/FAILED flow)
+// ---------------------------------------------------------------------------
+
+/**
+ * Poll Horizon until a submitted transaction appears in a closed ledger and
+ * reaches at least CONFIRMED state (per the finality policy), or until a
+ * timeout expires.
+ *
+ * Design:
+ *   - Uses exponential backoff starting at POLL_INITIAL_DELAY_MS, capped at
+ *     POLL_MAX_DELAY_MS, with ±30 % jitter to spread concurrent polls.
+ *   - Times out after FINALITY_POLL_TIMEOUT_MS (env override, default 5 min).
+ *     On timeout the payment is failed with reason FINALITY_TIMEOUT.
+ *   - Horizon errors are retried (networkErrorBehavior = 'hold'). Only a
+ *     full-window timeout with nothing but errors produces STELLAR_NETWORK_ERROR.
+ *   - If Horizon reports the tx itself was not successful (on-chain failure)
+ *     the payment is failed immediately with TX_FAILED_ON_CHAIN.
+ *
+ * @param {object}  paymentDoc          - Mongoose Payment document (mutable)
+ * @param {string}  txHash              - Stellar transaction hash
+ * @param {object}  [opts]
+ * @param {number}  [opts.timeoutMs]    - Override for FINALITY_POLL_TIMEOUT_MS
+ * @param {number}  [opts.initialDelayMs] - First poll delay (default 2 s)
+ * @param {number}  [opts.maxDelayMs]   - Cap on backoff delay (default 10 s)
+ * @returns {Promise<{
+ *   status: 'SUCCESS'|'FAILED',
+ *   failureReason: string|null,
+ *   confirmationState: string,
+ *   confirmationStatus: string,
+ *   ledger: number|null,
+ * }>}
+ */
+const { PAYMENT_FAILURE_REASONS } = require('../constants/paymentStatus');
+
+const FINALITY_POLL_TIMEOUT_MS = parseInt(
+  process.env.FINALITY_POLL_TIMEOUT_MS || String(5 * 60 * 1000), // 5 minutes
+  10,
+);
+const FINALITY_POLL_INITIAL_DELAY_MS = parseInt(
+  process.env.FINALITY_POLL_INITIAL_DELAY_MS || '2000',
+  10,
+);
+const FINALITY_POLL_MAX_DELAY_MS = parseInt(
+  process.env.FINALITY_POLL_MAX_DELAY_MS || '10000',
+  10,
+);
+
+async function pollForLedgerInclusion(paymentDoc, txHash, opts = {}) {
+  const timeoutMs      = opts.timeoutMs    || FINALITY_POLL_TIMEOUT_MS;
+  const initialDelayMs = opts.initialDelayMs || FINALITY_POLL_INITIAL_DELAY_MS;
+  const maxDelayMs     = opts.maxDelayMs   || FINALITY_POLL_MAX_DELAY_MS;
+
+  const deadline = Date.now() + timeoutMs;
+  let attempt    = 0;
+  let lastNetworkError = null;
+
+  logger.info('Starting ledger finality poll', {
+    txHash,
+    timeoutMs,
+    schoolId: paymentDoc.schoolId,
+    studentId: paymentDoc.studentId,
+  });
+
+  while (Date.now() < deadline) {
+    attempt++;
+
+    // Exponential backoff with ±30 % jitter
+    if (attempt > 1) {
+      const base  = Math.min(initialDelayMs * 2 ** (attempt - 2), maxDelayMs);
+      const jitter = Math.floor(base * 0.3 * Math.random());
+      const wait  = base + jitter;
+      logger.debug('Ledger finality poll waiting before next attempt', { txHash, attempt, waitMs: wait });
+      await new Promise((r) => setTimeout(r, wait));
+    }
+
+    if (Date.now() >= deadline) break;
+
+    // 1. Fetch the transaction from Horizon
+    let tx;
+    try {
+      tx = await withStellarRetry(
+        () => server.transactions().transaction(txHash).call(),
+        { label: 'pollForLedgerInclusion', context: `Transaction ${txHash}`, maxAttempts: 1 },
+      );
+      lastNetworkError = null; // reset on successful fetch
+    } catch (err) {
+      if (err.code === 'NOT_FOUND') {
+        // Tx not yet visible on Horizon — may still be propagating. Keep polling.
+        logger.debug('Transaction not yet found on Horizon — retrying', { txHash, attempt });
+        continue;
+      }
+      // Transient Horizon error — hold and retry per networkErrorBehavior='hold'
+      lastNetworkError = err;
+      logger.warn('Horizon error during finality poll — holding', {
+        txHash, attempt, error: err.message, code: err.code,
+      });
+      continue;
+    }
+
+    // 2. Check on-chain success flag. A tx can be included but failed (#840).
+    if (tx.successful === false) {
+      logger.warn('Transaction failed on-chain during finality poll', { txHash });
+      const confirmation = await determineConfirmationState(
+        tx.ledger_attr || tx.ledger || null,
+        CONFIRMATION_STATES.DETECTED,
+        false,
+      );
+      return {
+        status: 'FAILED',
+        failureReason: PAYMENT_FAILURE_REASONS.TX_FAILED_ON_CHAIN,
+        confirmationState: CONFIRMATION_STATES.FAILED,
+        confirmationStatus: 'failed',
+        ledger: tx.ledger_attr || tx.ledger || null,
+      };
+    }
+
+    // 3. Evaluate finality against the confirmation state machine
+    const txLedger = tx.ledger_attr || tx.ledger || null;
+    const { state: nextState, changed, confirmationStatus } = await determineConfirmationState(
+      txLedger,
+      paymentDoc.confirmationState || CONFIRMATION_STATES.DETECTED,
+      paymentDoc.isSuspicious || false,
+    );
+
+    logger.debug('Finality poll state check', {
+      txHash, attempt, txLedger, nextState, changed,
+    });
+
+    // 4. Advance the in-memory document's confirmationState so subsequent
+    //    determineConfirmationState calls don't regress it.
+    if (changed) {
+      paymentDoc.confirmationState = nextState;
+    }
+
+    if (isConfirmedOrAbove(nextState)) {
+      logger.info('Transaction reached ledger finality', {
+        txHash, confirmationState: nextState, attempts: attempt,
+      });
+      return {
+        status: 'SUCCESS',
+        failureReason: null,
+        confirmationState: nextState,
+        confirmationStatus,
+        ledger: txLedger,
+      };
+    }
+
+    // Not yet confirmed — keep polling
+    logger.debug('Transaction not yet confirmed — continuing poll', { txHash, nextState, attempt });
+  }
+
+  // Timeout expired
+  const failureReason = lastNetworkError
+    ? PAYMENT_FAILURE_REASONS.STELLAR_NETWORK_ERROR
+    : PAYMENT_FAILURE_REASONS.FINALITY_TIMEOUT;
+
+  logger.warn('Ledger finality poll timed out', {
+    txHash,
+    failureReason,
+    attempts: attempt,
+    timeoutMs,
+    schoolId: paymentDoc.schoolId,
+  });
+
+  return {
+    status: 'FAILED',
+    failureReason,
+    confirmationState: CONFIRMATION_STATES.FAILED,
+    confirmationStatus: 'failed',
+    ledger: null,
+  };
+}
+
 module.exports = {
   syncPaymentsForSchool,
   finalizeConfirmedPayments,
@@ -1144,6 +1318,7 @@ module.exports = {
   // Consumed by transactionPollingService (import + call) and covered by tests —
   // must be exported or those callers invoke `undefined`.
   determineConfirmationState,
+  pollForLedgerInclusion,
   // recordPayment was moved to transactionService.savePayment (db layer split);
   // re-exported under its original name since paymentController, retryService,
   // transactionQueueService, and transactionRetryQueue still import it from here.

@@ -49,11 +49,16 @@ export function useAdminAuth() {
   const router = useRouter();
   const [isAdmin, setIsAdmin] = useState(false);
   const [schoolId, setSchoolId] = useState(null);
+  const [timeZone, setTimeZone] = useState('UTC');
   const [userId, setUserId] = useState(null);
+  const [features, setFeatures] = useState({});
   const [checked, setChecked] = useState(false);
   // #1218 — surfaces a recoverable auth-me failure so consuming pages can
   // render a "Retry" affordance instead of silently breaking.
   const [authMeError, setAuthMeError] = useState(false);
+  // #253 — expose the JWT expiry timestamp so components can schedule a
+  // session-expiry warning toast before the token expires.
+  const [tokenExp, setTokenExp] = useState(null);
 
   // Tracks whether the component is still mounted so async callbacks don't
   // update state after unmount.
@@ -70,8 +75,13 @@ export function useAdminAuth() {
     if (!mountedRef.current) return;
     setIsAdmin(true);
     setSchoolId(data.schoolId || null);
+    setTimeZone(data.timezone || 'UTC');
     setUserId(data.userId || null);
+    setFeatures(data.features && typeof data.features === 'object' ? data.features : {});
     setAuthMeError(false);
+    // #253 — store the JWT expiry claim so components can schedule a
+    // session-expiry warning toast before the access token expires.
+    setTokenExp(typeof data.exp === 'number' ? data.exp : null);
     if (typeof window !== 'undefined') {
       if (data.schoolId) localStorage.setItem('schoolId', data.schoolId);
       if (data.userId)   localStorage.setItem('userId',   data.userId);
@@ -89,7 +99,9 @@ export function useAdminAuth() {
         if (!mountedRef.current) return;
         setIsAdmin(false);
         setSchoolId(null);
+        setTimeZone('UTC');
         setUserId(null);
+        setFeatures({});
       })
       .finally(() => {
         if (mountedRef.current) setChecked(true);
@@ -111,7 +123,9 @@ export function useAdminAuth() {
         // /auth/me context could not be loaded so the UI can offer a retry.
         setIsAdmin(true);
         setSchoolId(null);
+        setTimeZone('UTC');
         setUserId(null);
+        setFeatures({});
         setAuthMeError(true);
       });
   }, [applyAuthData]);
@@ -140,8 +154,11 @@ export function useAdminAuth() {
     }).catch(() => console.debug('[useAdminAuth] logout request failed'));
     setIsAdmin(false);
     setSchoolId(null);
+    setTimeZone('UTC');
     setUserId(null);
+    setFeatures({});
     setAuthMeError(false);
+    setTokenExp(null);
     // Clear school context from storage
     if (typeof window !== 'undefined') {
       localStorage.removeItem('schoolId');
@@ -150,5 +167,5 @@ export function useAdminAuth() {
     router.push('/login');
   }, [router]);
 
-  return { isAdmin, checked, login, logout, schoolId, userId, authMeError, retryAuth };
+  return { isAdmin, checked, login, logout, schoolId, timeZone, userId, authMeError, retryAuth };
 }

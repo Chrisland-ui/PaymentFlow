@@ -35,6 +35,6 @@ router.post('/dry-run', requireAdminAuth, dryRunRule);
 // ── #902 Batch/transactional apply ───────────────────────────────────────────
 // POST /api/fee-adjustments/:id/apply
 // Apply an existing rule to matching students via bulkWrite inside a session.
-router.post('/:id/apply', requireAdminAuth, applyRule);
+router.post('/:id/apply', requireAdminAuth, auditContext, applyRule);
 
 module.exports = router;

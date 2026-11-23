@@ -1,0 +1,84 @@
+groups:
+  - name: paymentflow_slo_alerts
+    interval: 60s
+    rules:
+      - alert: ApiAvailabilitySLOBurn
+        expr: |
+          (
+            1 - sum(rate(http_request_duration_seconds_count{status=~"5.."}[5m]))
+              / clamp_min(sum(rate(http_request_duration_seconds_count[5m])), 0.001)
+          ) < 0.999
+        for: 10m
+        labels:
+          severity: critical
+          slo: api-availability
+          owner: api
+        annotations:
+          summary: "API availability is below the 99.9% SLO"
+          runbook: "docs/runbooks/slo-burn-rate.md#api-availability"
+          description: "The API is consuming its 30-day availability error budget."
+
+      - alert: ApiLatencySLOBurn
+        expr: |
+          histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[10m])) by (le)) > 1
+        for: 10m
+        labels:
+          severity: warning
+          slo: api-latency
+          owner: api
+        annotations:
+          summary: "API p95 latency is above the 1 second SLO"
+          runbook: "docs/runbooks/slo-burn-rate.md#api-latency"
+          description: "API p95 latency has exceeded the target for 10 minutes."
+
+      - alert: TransactionQueueAgeSLOBurn
+        expr: transaction_queue_oldest_age_seconds > 60
+        for: 10m
+        labels:
+          severity: warning
+          slo: queue-age
+          owner: payments
+        annotations:
+          summary: "Transaction queue age is above the 60 second SLO"
+          runbook: "docs/runbooks/slo-burn-rate.md#queue-age"
+          description: "The oldest queued transaction has exceeded the queue-age target."
+
+      - alert: WebhookSuccessSLOBurn
+        expr: |
+          sum(rate(webhook_delivery_total{status=~"success|delivered"}[15m]))
+            / clamp_min(sum(rate(webhook_delivery_total[15m])), 0.001) < 0.995
+        for: 15m
+        labels:
+          severity: warning
+          slo: webhook-success
+          owner: integrations
+        annotations:
+          summary: "Webhook delivery success is below the 99.5% SLO"
+          runbook: "docs/runbooks/slo-burn-rate.md#webhook-success"
+          description: "Webhook delivery failures are consuming the integration error budget."
+
+      - alert: ReconciliationLagSLOBurn
+        expr: reconciliation_lag_seconds > 900
+        for: 15m
+        labels:
+          severity: warning
+          slo: reconciliation-lag
+          owner: finance
+        annotations:
+          summary: "Reconciliation lag is above the 15 minute SLO"
+          runbook: "docs/runbooks/slo-burn-rate.md#reconciliation-lag"
+          description: "Reconciliation has not caught up within the target window."
+
+      - alert: PaymentErrorBudgetFastBurn
+        expr: |
+          sum(rate(http_request_duration_seconds_count{status=~"5..",route=~".*/payments.*"}[5m]))
+            / clamp_min(sum(rate(http_request_duration_seconds_count{route=~".*/payments.*"}[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          slo: payment-availability
+          owner: payments
+        annotations:
+          summary: "Payment error budget is burning rapidly"
+          runbook: "docs/runbooks/slo-burn-rate.md#payment-availability"
+          description: "Payment endpoints have exceeded the fast-burn error threshold."

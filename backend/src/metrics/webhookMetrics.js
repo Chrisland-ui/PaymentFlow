@@ -18,7 +18,7 @@
  *     Refreshed on startup and after each delivery write via refreshDeadLetterGauge().
  */
 
-const { registry } = require('./index');
+const { registry, webhookDeliveryTotal } = require('./index');
 const client = require('prom-client');
 
 // ── webhook_deliveries_total ──────────────────────────────────────────────────
@@ -35,6 +35,14 @@ const webhookDeliveryDurationMs = new client.Histogram({
   help: 'Webhook delivery round-trip time in milliseconds',
   labelNames: ['event'],
   buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10000],
+  registers: [registry],
+});
+
+const webhookDeliveryDurationSeconds = new client.Histogram({
+  name: 'webhook_delivery_duration_seconds',
+  help: 'Webhook delivery round-trip time in seconds',
+  labelNames: ['event'],
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
   registers: [registry],
 });
 
@@ -81,8 +89,10 @@ async function refreshDeadLetterGauge() {
  * @param {number} durationMs  Round-trip time in ms
  */
 function recordDeliverySuccess(event, durationMs) {
+  webhookDeliveryTotal.inc({ status: 'success' });
   webhookDeliveriesTotal.inc({ event, outcome: 'success' });
   webhookDeliveryDurationMs.observe({ event }, durationMs);
+  webhookDeliveryDurationSeconds.observe({ event }, durationMs / 1000);
 }
 
 /**
@@ -94,19 +104,47 @@ function recordDeliverySuccess(event, durationMs) {
  * @param {string}  [schoolId]   Required when isDeadLetter is true
  */
 function recordDeliveryFailure(event, durationMs, isDeadLetter = false, schoolId = null) {
+  webhookDeliveryTotal.inc({ status: 'failure' });
   webhookDeliveriesTotal.inc({ event, outcome: 'failure' });
   webhookDeliveryDurationMs.observe({ event }, durationMs);
+  webhookDeliveryDurationSeconds.observe({ event }, durationMs / 1000);
 
   if (isDeadLetter && schoolId) {
     webhookDeadLetterTotal.inc({ schoolId });
   }
 }
 
+function recordDeadLetter(schoolId) {
+  if (schoolId) webhookDeadLetterTotal.inc({ schoolId });
+}
+
+// ── webhook_inbound_verification_failures_total ─────────────────────────────
+const webhookInboundVerificationFailuresTotal = new client.Counter({
+  name: 'webhook_inbound_verification_failures_total',
+  help: 'Total inbound webhook verification failures by provider and reason',
+  labelNames: ['provider', 'reason'],
+  registers: [registry],
+});
+
+/**
+ * Record an inbound webhook verification failure.
+ *
+ * @param {string} provider Provider identifier
+ * @param {string} reason Reason code (e.g. INVALID_SIGNATURE, TIMESTAMP_SKEW)
+ */
+function recordInboundVerificationFailure(provider = 'stellaredupay', reason = 'UNKNOWN') {
+  webhookInboundVerificationFailuresTotal.inc({ provider, reason });
+}
+
 module.exports = {
   webhookDeliveriesTotal,
   webhookDeliveryDurationMs,
+  webhookDeliveryDurationSeconds,
   webhookDeadLetterTotal,
+  webhookInboundVerificationFailuresTotal,
   refreshDeadLetterGauge,
   recordDeliverySuccess,
   recordDeliveryFailure,
+  recordDeadLetter,
+  recordInboundVerificationFailure,
 };

@@ -56,6 +56,22 @@ const es = {
     staff: "Estado",
   },
 
+  pagination: {
+    label: "Paginación",
+    firstPage: "Primera página",
+    lastPage: "Última página",
+    previousPage: "Página anterior",
+    nextPage: "Página siguiente",
+    firstPageAria: "Ir a la primera página de {{total}}",
+    lastPageAria: "Ir a la última página de {{total}}",
+    previousPageAria: "Ir a la página anterior (página {{page}} de {{total}})",
+    nextPageAria: "Ir a la página siguiente (página {{page}} de {{total}})",
+    pageAria: "Página {{page}} de {{total}}",
+    ellipsis: "Más páginas",
+    rangeOf: "{{start}}–{{end}} de {{total}} {itemLabel}",
+    shortcutHint: "Presione g seguido de un número para ir a esa página",
+  },
+
   time: {
     never: "Nunca",
     justNow: "Ahora mismo",
@@ -201,6 +217,27 @@ const es = {
 
   components: {
     testnetBanner: "TESTNET — No envíe fondos reales",
+  },
+
+  dateRangePicker: {
+    ariaLabel: "Selector de rango de fechas",
+    timezoneLabel: "Fechas en {{tz}}",
+    changeTimezone: "Cambiar zona horaria",
+    hideTimezone: "Ocultar zona horaria",
+    timezoneSelectLabel: "Zona horaria personalizada",
+    presetsLabel: "Rangos de fechas predefinidos",
+    fromLabel: "Desde",
+    toLabel: "Hasta",
+    fromAriaLabel: "Fecha de inicio",
+    toAriaLabel: "Fecha de fin",
+    preset: {
+      today: "Hoy",
+      yesterday: "Ayer",
+      last7: "Últimos 7 días",
+      thisMonth: "Este mes",
+      lastMonth: "Mes pasado",
+      custom: "Personalizado",
+    },
   },
 };
 

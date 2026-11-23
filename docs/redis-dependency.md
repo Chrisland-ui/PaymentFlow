@@ -1,114 +1,187 @@
-# Redis Dependency & Graceful Degradation
+# Redis Dependency Health and Degradation Policy
 
-> Audit reference: Issue #83 (#872) — Redis is a single point of failure for the
-> queue, SSE pub/sub, rate limiting, refresh tokens, and distributed locks.
+This document defines the health check contracts, probe timeouts, degradation policies, readiness semantics, and Prometheus metrics for Redis-dependent components in PaymentFlow.
 
-When `REDIS_HOST` is set, Redis backs several subsystems at once, so a single
-Redis outage has a wide blast radius. This document is the dependency surface,
-the per-consumer degradation contract, the reconnection policy, and the HA
-recommendation.
+---
 
-## Dependency surface
+## 1. Overview & Architectural Guiding Principles
 
-| Consumer            | Module                              | Used for                                  |
-|---------------------|-------------------------------------|-------------------------------------------|
-| Retry queue (BullMQ)| `queue/transactionRetryQueue.js`    | Durable failed-transaction retries        |
-| SSE pub/sub         | `services/sseService.js`            | Cross-replica real-time event fan-out     |
-| Rate limiting       | `middleware/rateLimiter.js`         | Shared rate-limit counters across replicas|
-| Refresh-token store | auth/session layer                  | Refresh-token validity / revocation       |
-| Distributed locks   | `services/distributedLock.js`       | Single-processing of a school's sync      |
-| **Webhook nonce store** | `services/webhookService.js`    | **Inbound delivery replay deduplication** |
+PaymentFlow uses Redis for distributed caching and asynchronous queue processing (e.g., BullMQ transaction verification retry and report generation). However, external cache/queue outages should result in controlled, safe degradation rather than unexpected request failures or silent data loss.
 
-## Degradation modes
+### Core Policies:
+1. **Readiness Reflects Required Dependencies**: When Redis is marked as required via `REDIS_REQUIRED=true`, the readiness probe (`/health/ready`) and health check (`/health`) will mark the service as unready/unhealthy (HTTP 503) if Redis is unavailable or failing probes. When Redis is optional (`REDIS_REQUIRED=false`), Redis outages degrade the service gracefully without failing Kubernetes readiness probes.
+2. **Safe Cache Degradation**: Read and write paths to the cache degrade to local in-memory storage (`NodeCache`) when Redis is unreachable or times out, preventing user-facing HTTP 500 errors.
+3. **Actionable Errors on Queue Mutations**: If an asynchronous mutation requires Redis/BullMQ (e.g. async report generation) and the queue is unavailable, the API returns a structured, actionable error (HTTP 503 with code `QUEUE_UNAVAILABLE` and retry recommendations).
+4. **Metrics Distinguish Outage from Miss**: Prometheus metrics explicitly separate normal cache misses (when a key simply does not exist) from dependency outages (when Redis is down, unreachable, or times out).
 
-Each consumer has a defined behaviour when Redis is unavailable:
+---
 
-| Consumer          | Degradation mode                                                                 |
-|-------------------|---------------------------------------------------------------------------------|
-| Distributed locks | **Fail closed** — `acquire()` returns `null` on Redis error, so the cycle is skipped rather than risking two workers proceeding. The unique index on `Payment {schoolId, txHash}` remains the authoritative dedup guard. In multi-replica deployments (`REPLICA_COUNT > 1`), the leader election service **refuses to start** if Redis is not configured. This prevents all replicas from thinking they are the leader and running all background jobs in parallel. |
-| SSE pub/sub       | **Falls back to local fan-out with client notification** — a failed `PUBLISH` still delivers to clients connected to the current replica; cross-replica delivery is lost until Redis recovers. All locally-connected clients receive an explicit `sse.degraded` SSE event so the frontend can render a visible warning banner (Issue #1054). An `sse.recovered` event is broadcast on reconnection. With `REDIS_HOST` unset it runs single-process by design (no degraded signal is emitted). |
-| Retry queue       | Initialization failure is surfaced loudly in logs and via `/health` (`retryQueue.status: failed`); the HTTP server still boots. Without `REDIS_HOST` the MongoDB backend is used (single-replica only — see [retry-backends.md](./retry-backends.md)). |
-| Rate limiting     | Counters become in-process per replica (not shared); limits still apply locally, using the same sliding-window algorithm as the Redis path (see `middleware/rateLimiter.js`). **A Redis outage therefore multiplies every rate limit by the replica count** — `deploy/k8s/backend-deployment.yaml` currently sets `replicas: 2`, so e.g. `strictLimiter`'s 10-requests-per-15-minutes becomes an effective 20 requests per 15 minutes cluster-wide while Redis is down, since each replica enforces the limit independently against its own in-process counters. A loud startup warning is emitted for the MongoDB/in-process path. |
-| Refresh tokens    | Validation degrades; treat as fail-closed for session issuance.                 |
-| **Webhook nonce store** | **Fail closed** — when Redis is unavailable (not configured, not ready, or returns an error during a nonce write), `_isReplay()` returns `true` so the delivery is **rejected** rather than allowed through with no dedup guarantee. This prevents a Redis outage from silently degrading replay protection from "cluster-wide" to "per-replica" in multi-replica deployments (`deploy/k8s/backend-deployment.yaml` sets `replicas: 2`). A warning is logged on every rejection: `Redis unavailable in _isReplay — failing closed`. **Operational impact:** while Redis is down, all inbound webhook deliveries that pass HMAC verification will be rejected with a replay error. Senders should retry once Redis is healthy. To restore the previous in-process-fallback behaviour (single-process dev/test environments only), set `WEBHOOK_REPLAY_NONCES_LOCAL=true`. |
+## 2. Configuration & Environment Variables
 
-The guiding principle: **anything guarding correctness (locks, dedup) fails
-closed; anything best-effort (SSE) degrades to local.**
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `REDIS_HOST` | *(unset)* | Redis server hostname. If unset, Redis is disabled. |
+| `REDIS_PORT` | `6379` | Redis server port. |
+| `REDIS_REQUIRED` | `false` | When set to `'true'`, Redis is treated as a mandatory readiness dependency. |
+| `REDIS_CHECK_TIMEOUT_MS`| `2000` | Timeout in milliseconds for Redis `PING` health probes. |
+| `REDIS_CACHE_TIMEOUT_MS`| `1000` | Bounded read timeout for Redis cache gets before degrading to memory. |
 
-## Health reporting
+---
 
-`GET /health` reports Redis status under `checks.retryQueue`:
+## 3. Health Checks and Readiness Semantics
 
-```json
-"retryQueue": {
-  "status": "ok",
-  "backend": "bullmq",
-  "redisConfigured": true,
-  "redisStatus": "ready",
-  "redisHost": "...",
-  "lastUpdatedAt": "..."
-}
+### `/health/ready` (Kubernetes Readiness Probe)
+The readiness probe ensures traffic is routed to a pod only when its required dependencies are operational:
+- **Database** (`database.healthCheck()`): Must be healthy.
+- **Stellar Horizon** (`checkStellar()`): Must be ok.
+- **Shutdown Manager**: Must not be in shutting-down state.
+- **Redis Dependency**:
+  - If `REDIS_REQUIRED=true`: Evaluates `checkRedis()`. If Redis is disabled, unreachable, or times out, returns HTTP 503:
+    ```json
+    {
+      "status": "not_ready",
+      "reason": "required_dependency_unhealthy",
+      "unhealthyDependency": "redis",
+      "checks": {
+        "database": { "status": "healthy" },
+        "stellar": { "status": "ok" },
+        "redis": {
+          "configured": true,
+          "status": "unreachable",
+          "required": true,
+          "error": "Redis did not respond to PING within 2000ms"
+        }
+      }
+    }
+    ```
+  - If `REDIS_REQUIRED=false` (or unset): Redis outages do not block readiness; returns HTTP 200 with Redis status reported as `unreachable` or `disabled`.
+
+### `/health` (Detailed Health Endpoint)
+Includes diagnostic status for on-call engineers:
+- When `REDIS_REQUIRED=true` and Redis is down: Returns HTTP 503 (`status: 'unhealthy'`).
+- When `REDIS_REQUIRED=false` and Redis is down (but configured): Returns HTTP 200 (`status: 'degraded'`).
+- Surfaces `checks.redis` containing `configured`, `status`, `required`, `latency_ms`, and optional error details.
+
+---
+
+## 4. Cache Multi-Tier & Degradation Policy
+
+The cache layer (`backend/src/cache.js`) implements a two-tier strategy:
+1. **Tier 1 (Redis)**: Distributed shared cache across application instances.
+2. **Tier 2 (NodeCache)**: In-memory local fallback.
+
+### Behavior on Outage:
+- **`asyncGet(key, options)`**:
+  - Attempts Redis read with bounded timeout (`REDIS_CACHE_TIMEOUT_MS`).
+  - If Redis responds with data: records hit (`cache_hits_total`), returns parsed object.
+  - If Redis reports key not found: continues to local cache.
+  - If Redis times out, errors, or is disconnected: logs a warning, records an outage degradation (`cache_outages_total`), and falls back to local cache. Caller requests never throw.
+- **`asyncSet(key, value, ttl, options)` / `set(key, value, ttl)`**:
+  - Always writes immediately to local in-memory cache.
+  - Asynchronously propagates to Redis.
+  - Redis connection failure is caught, logged, and incremented as an outage metric (`cache_outages_total`).
+- **`getSafe(key, fallbackLoader, options)`**:
+  - Combines `asyncGet` with an automatic fallback loader.
+  - On miss or degradation, calls `fallbackLoader()`, writes the result to cache, and returns it.
+
+---
+
+## 5. Queue-Dependent Mutations
+
+Mutations that require an asynchronous job queue (e.g., async export/report jobs via `enqueueReportJob`):
+- If Redis / queue worker is down, the request fails fast with HTTP 503 instead of hanging or returning an unhandled 500 error.
+- Returns a standardized actionable response:
+  ```json
+  {
+    "error": "Async report queue is temporarily unavailable. Please retry synchronously or try again later.",
+    "code": "QUEUE_UNAVAILABLE",
+    "actionable": true,
+    "retryAfterSeconds": 30,
+    "details": "Queue dependency outage detected; async report mutation cannot be queued at this time."
+  }
+  ```
+
+---
+
+## 6. Prometheus Metrics
+
+The metrics registry exports the following counters and gauges to distinguish normal operational misses from infrastructure outages:
+
+| Metric Name | Type | Labels | Description |
+| :--- | :--- | :--- | :--- |
+| `cache_operations_total` | Counter | `cache`, `result` (`hit`, `miss`, `outage`) | Total cache operations categorized by result. |
+| `cache_hits_total` | Counter | `cache` | Number of successful cache hits. |
+| `cache_misses_total` | Counter | `cache` | Normal cache misses (key was looked up but did not exist). |
+| `cache_outages_total` | Counter | `cache` | Outage events where Redis timed out or errored during cache read/write. |
+| `redis_connected` | Gauge | *none* | 1 if Redis client is currently connected and ready, 0 otherwise. |
+
+### Alerting Rule Example:
+```promql
+# High cache outage rate indicates Redis connection or latency degradation
+rate(cache_outages_total[5m]) > 0.05
 ```
 
-`redisStatus` is one of `ready | connecting | reconnecting | unavailable |
-closed | ended | disabled`. When Redis is configured but not `ready`, overall
-health is reported as `degraded` (HTTP 200) — DB is still up and cached data can
-be served.
+---
 
-## Reconnection policy
+## 7. Startup Retry Policy (Issue #286)
 
-All consumers share one policy via `getRedisConnectionOptions()` in
-`config/redisClient.js`, so backoff and transient-error handling are identical
-everywhere (previously each client set its own ad-hoc options):
+When `REDIS_HOST` is configured, the application can wait for Redis to become
+available before deciding whether to start in degraded mode or abort.
 
-| Env var                          | Default | Meaning                              |
-|----------------------------------|---------|--------------------------------------|
-| `REDIS_RECONNECT_MAX_ATTEMPTS`   | `8`     | Reconnect attempts before giving up  |
-| `REDIS_RECONNECT_BASE_DELAY_MS`  | `500`   | Base backoff between attempts        |
-| `REDIS_RECONNECT_MAX_DELAY_MS`   | `30000` | Backoff cap                          |
-| `REDIS_LOG_THROTTLE_MS`          | `60000` | Throttle for repeated Redis warnings |
+### `waitForRedis(timeoutMs, retryIntervalMs)`
 
-- `retryStrategy` backs off exponentially and returns `null` after the max
-  attempts (stop reconnecting).
-- `reconnectOnError` reconnects only on transient codes (`ECONNREFUSED`,
-  `ENOTFOUND`, `ETIMEDOUT`, `EHOSTUNREACH`).
-- Consumers needing blocking commands (BullMQ Worker/QueueEvents, pub/sub
-  subscriber, lock client) override `maxRetriesPerRequest: null` while inheriting
-  the rest of the shared policy.
+Located in `backend/src/config/redisClient.js`, this function performs bounded
+startup probing with exponential backoff:
 
-Pinned by `backend/tests/redisReconnectionPolicy.test.js`.
+| Parameter | Default | Source |
+|-----------|---------|--------|
+| `timeoutMs` | `30 000` ms | `REDIS_STARTUP_TIMEOUT_MS` env var |
+| `retryIntervalMs` (initial) | `500` ms | hardcoded constant |
+| Max interval | `5 000` ms | hardcoded constant |
 
-## High availability
+**Retry schedule:**
 
-For production, run Redis in an HA topology so a single node failure does not
-take down all of the above simultaneously:
+| Attempt | Wait before attempt |
+|---------|-------------------|
+| 1 | immediate |
+| 2 | 500 ms |
+| 3 | 1 000 ms |
+| 4 | 2 000 ms |
+| 5+ | 5 000 ms (capped) |
 
-- **Redis Sentinel** — automatic failover for a primary/replica set. ioredis
-  accepts `{ sentinels, name }`; thread these through `getRedisConnectionOptions`.
-- **Redis Cluster** — sharded + replicated for horizontal scale.
+If the budget expires:
+- `REDIS_REQUIRED=false` — application continues in **degraded mode**: rate
+  limiting falls back to in-process counters, BullMQ falls back to MongoDB
+  retry backend, other components degrade per the classification table below.
+- `REDIS_REQUIRED=true` — the caller (app startup) should not accept traffic
+  (readiness probe returns 503) until Redis becomes available.
 
-Operationally: deploy Redis with persistence (AOF), monitor `redisStatus` via
-`/health`, and alert on `degraded`. Pair HA Redis with `REPLICA_COUNT` set
-correctly so the BullMQ backend is selected (never the in-process MongoDB
-fallback) in multi-replica deployments.
+Returns `{ connected: boolean, attempts: number, reason?: string }`.
 
-## Leader Election & Multi-Replica Safety
+---
 
-When `REPLICA_COUNT > 1` and `REDIS_HOST` is not configured, the leader election
-service (issue #1321) will **refuse to start** with a critical error. This is a hard
-requirement because without distributed locks in a multi-replica deployment:
+## 8. Degradation Classification (Issue #286)
 
-- All replicas believe they are the leader and run all background jobs N times per cycle.
-- Reminders are sent N times to each parent.
-- Audit logs record the same events N times, breaking the audit trail for compliance.
-- Reconciliation runs in parallel, causing race conditions and incorrect balances.
-- All other leader-only schedulers (webhook retry, metrics rollup, consistency checks) duplicate.
+Every Redis-dependent component in PaymentFlow is classified by its criticality
+so on-call engineers know what degrades during a Redis outage.
 
-This is an unrecoverable configuration error in production. To proceed:
+| Component | File | Criticality | Degraded Behavior |
+|-----------|------|-------------|-------------------|
+| BullMQ transaction retry queue | `src/queue/transactionRetryQueue.js` | **CRITICAL** | Automatically falls back to MongoDB-backed retry service (`retryServiceSelector.js`) |
+| BullMQ report generation queue | `src/queue/reportQueue.js` | **CRITICAL** | Returns HTTP 503 `QUEUE_UNAVAILABLE` — report jobs cannot be enqueued until Redis is restored |
+| Rate limiting | `src/middleware/rateLimiter.js` | **DEGRADABLE** | Falls back to in-process sliding-window counter per replica; limits are not coordinated across replicas |
+| Auth IP-block tracking | `src/middleware/auth.js` | **DEGRADABLE** | Falls back to in-process `NodeCache`; blocks are not coordinated across replicas |
+| Distributed lock | `src/services/distributedLock.js` | **DEGRADABLE** | Operations proceed without distributed lock; concurrent execution risk for lock-guarded jobs |
+| Idempotency key store | `src/services/idempotencyStore.js` | **DEGRADABLE** | Falls back to MongoDB-backed idempotency store |
+| Session / read-through cache | `src/cache.js` | **DEGRADABLE** | Falls back to `NodeCache` in-process store; cache is not shared across replicas |
+| Leader election | `src/services/leaderElection.js` | **DEGRADABLE** | All replicas act as leader; background jobs may run on multiple instances |
+| SSE pub/sub | `src/services/sseService.js` | **OPTIONAL** | SSE events are only delivered to the local replica's connected clients |
 
-1. Set `REDIS_HOST` to a running Redis instance.
-2. Ensure `REPLICA_COUNT` accurately reflects the number of deployed backend replicas.
-3. Restart the application.
+**Impact summary during a Redis outage:**
 
-In development and test environments where `REPLICA_COUNT=1` or is unset, the in-process
-lock fallback is safe and Redis is optional.
+- Users can still log in and make payments (MongoDB is the authoritative store).
+- Rate limiting becomes per-replica only — burst protection is weakened.
+- Failed payment retries switch to MongoDB backend automatically.
+- Real-time SSE notifications may be missed if the client is connected to a
+  different replica.
+- Report generation is temporarily unavailable (returns HTTP 503).

@@ -9,8 +9,13 @@ import {
 } from "../services/api";
 import { getErrorMessage } from "../utils/errorMessages";
 import { DEFAULT_CLASS_OPTIONS, loadSchoolClassOptions } from "../utils/classOptions";
-import { IconAlertTriangle, IconCheck, IconDollarSign } from "../components/Icons";
+import { IconAlertTriangle, IconCheck, IconDollarSign, IconChevronLeft, IconChevronRight } from "../components/Icons";
 import PageHero from "../components/PageHero";
+import EmptyState from "../components/EmptyState";
+import AccessiblePagination from "../components/AccessiblePagination";
+import ConfirmDialog from "../components/ConfirmDialog"; // Issue #108
+import { SkeletonTable } from "../components/Skeleton";
+import { useAbortController } from "../hooks/useAbortController";
 
 const EMPTY_FORM = {
   className: "",
@@ -18,67 +23,6 @@ const EMPTY_FORM = {
   academicYear: new Date().getUTCFullYear().toString(),
   description: "",
 };
-
-// ── Delete-confirmation modal ─────────────────────────────────────────────────
-
-function DeleteConfirmModal({ feeStructure, studentCount, onConfirm, onCancel }) {
-  const { t } = useTranslation();
-  const cancelRef = useRef(null);
-
-  useEffect(() => {
-    function onKey(e) {
-      if (e.key === "Escape") onCancel();
-    }
-    document.addEventListener("keydown", onKey);
-    cancelRef.current?.focus();
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onCancel]);
-
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="del-modal-title"
-      aria-describedby="del-modal-desc"
-      style={overlayStyle}
-    >
-      <div style={modalStyle}>
-        <h2 id="del-modal-title" style={{ marginTop: 0, fontSize: "1.1rem" }}>
-          {t("fees.deleteTitle")}
-        </h2>
-        <p id="del-modal-desc" style={{ color: "var(--text)", lineHeight: 1.5 }}>
-          {t("fees.deleteIntro")}{" "}
-          <strong>{feeStructure.className}</strong>.
-          {studentCount > 0 && (
-            <>
-              {" "}{t("fees.deleteAffects")}{" "}
-              <strong>
-                {t("fees.studentCount", { count: studentCount })}
-              </strong>
-              .
-            </>
-          )}{" "}
-          {t("fees.deleteCannotUndo")}
-        </p>
-        <div
-          style={{
-            display: "flex",
-            gap: "0.75rem",
-            justifyContent: "flex-end",
-            marginTop: "1.5rem",
-          }}
-        >
-          <button ref={cancelRef} onClick={onCancel} className="btn btn-ghost">
-            {t("actions.cancel")}
-          </button>
-          <button onClick={onConfirm} className="btn btn-danger">
-            {t("actions.delete")}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
@@ -99,6 +43,9 @@ export default function FeesPage() {
   const [pendingDelete, setPendingDelete] = useState(null); // { fee, studentCount }
   const [deleteError, setDeleteError]     = useState(null);
 
+  // Issue #254 — abort in-flight fee requests when the component unmounts.
+  const { signal } = useAbortController();
+
   const successRef = useRef(null);
 
   useEffect(() => {
@@ -118,14 +65,18 @@ export default function FeesPage() {
   function loadFees(page = 1) {
     setLoading(true);
     setError(null);
-    getFeeStructures({ page, limit: pagination.limit })
+    getFeeStructures({ signal, page, limit: pagination.limit })
       .then(({ data }) => {
         setFees(data.data || data);
         if (data.pagination) {
           setPagination(data.pagination);
         }
       })
-      .catch(() => setError(t("fees.failedToLoad")))
+      .catch((err) => {
+        // Silently ignore requests cancelled on unmount or navigation.
+        if (err?.name === "CanceledError" || err?.code === "ERR_CANCELED") return;
+        setError(t("fees.failedToLoad"));
+      })
       .finally(() => setLoading(false));
   }
 
@@ -383,16 +334,14 @@ export default function FeesPage() {
           </div>
 
           {loading ? (
-            <div className="card-body">
-              <p aria-busy="true" style={{ color: "var(--text-muted)" }}>
-                {t("fees.loading")}
-              </p>
-            </div>
+            <div className="card-body"><SkeletonTable columns={[90, 90, 100, "100%", 36]} rows={5} /></div>
           ) : fees.length === 0 ? (
             <div className="card-body">
-              <p style={{ color: "var(--text-muted)" }}>
-                {t("fees.empty")}
-              </p>
+              <EmptyState
+                variant="onboarding"
+                title={t("fees.empty")}
+                description={t("fees.emptyDesc")}
+              />
             </div>
           ) : (
             <div style={{ overflowX: "auto" }}>
@@ -450,37 +399,37 @@ export default function FeesPage() {
               </table>
             </div>
             {pagination.totalPages > 1 && (
-              <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: "0.5rem", padding: "1rem", borderTop: "1px solid var(--border)" }}>
-                <button
-                  onClick={() => loadFees(pagination.page - 1)}
-                  disabled={!pagination.hasPrev || loading}
-                  className="btn btn-sm btn-ghost"
-                  aria-label={t("actions.previousPage")}
-                >
-                  <IconChevronLeft size={16} />
-                </button>
-                <span style={{ fontSize: "0.875rem", color: "var(--text-muted)" }}>
-                  {t("pagination.page", { current: pagination.page, total: pagination.totalPages })}
-                </span>
-                <button
-                  onClick={() => loadFees(pagination.page + 1)}
-                  disabled={!pagination.hasNext || loading}
-                  className="btn btn-sm btn-ghost"
-                  aria-label={t("actions.nextPage")}
-                >
-                  <IconChevronRight size={16} />
-                </button>
-              </div>
+              <AccessiblePagination
+                currentPage={pagination.page}
+                totalPages={pagination.totalPages}
+                onPageChange={(p) => loadFees(p)}
+                total={pagination.total}
+                rangeStart={(pagination.page - 1) * pagination.limit + 1}
+                rangeEnd={Math.min(pagination.page * pagination.limit, pagination.total)}
+                loading={loading}
+                ariaLabel={t("fees.title")}
+                itemLabel={t("fees.title")}
+              />
             )}
           )}
         </div>
       </div>
 
-      {/* ── Delete modal ─────────────────────────────────────────────────── */}
+      {/* ── Delete confirmation dialog — Issue #108 ──────────────────────── */}
       {pendingDelete && (
-        <DeleteConfirmModal
-          feeStructure={pendingDelete.fee}
-          studentCount={pendingDelete.studentCount}
+        <ConfirmDialog
+          isOpen={Boolean(pendingDelete)}
+          title={t("fees.deleteTitle")}
+          description={
+            `${t("fees.deleteIntro")} ${pendingDelete.fee.className}.` +
+            (pendingDelete.studentCount > 0
+              ? ` ${t("fees.deleteAffects")} ${t("fees.studentCount", { count: pendingDelete.studentCount })}.`
+              : "") +
+            ` ${t("fees.deleteCannotUndo")}`
+          }
+          confirmLabel={t("actions.delete")}
+          variant="danger"
+          requireTyping={pendingDelete.fee.className}
           onConfirm={handleConfirmDelete}
           onCancel={() => setPendingDelete(null)}
         />
@@ -488,24 +437,3 @@ export default function FeesPage() {
     </>
   );
 }
-
-// ── Overlay styles (kept local — not in global CSS) ───────────────────────────
-
-const overlayStyle = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(0,0,0,0.45)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  zIndex: 1000,
-};
-
-const modalStyle = {
-  background: "var(--card-bg)",
-  borderRadius: 10,
-  padding: "1.5rem",
-  maxWidth: 420,
-  width: "90%",
-  boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
-};

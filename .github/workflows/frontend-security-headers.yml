@@ -1,0 +1,29 @@
+name: Frontend security headers
+
+on:
+  workflow_call:
+    inputs:
+      frontend_url:
+        description: Deployed frontend URL to check before traffic promotion
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      frontend_url:
+        description: Deployed frontend URL to check
+        required: true
+        type: string
+
+jobs:
+  verify-headers:
+    name: Verify deployed frontend headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Check deployed response headers
+        env:
+          FRONTEND_URL: ${{ inputs.frontend_url }}
+        run: node scripts/check-frontend-security-headers.js "$FRONTEND_URL"

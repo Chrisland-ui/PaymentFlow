@@ -21,7 +21,7 @@
 const { logger } = require('../utils/logger');
 const { httpRequestDurationSeconds } = require('../metrics');
 const { generateCorrelationId } = require('../utils/correlationId');
-const { REQUEST_LOG_REDACT_FIELDS } = require('../utils/redactConfig');
+const { REQUEST_LOG_REDACT_FIELDS, redactLogValue } = require('../utils/redactConfig');
 
 const DEFAULT_REDACT_FIELDS = REQUEST_LOG_REDACT_FIELDS;
 
@@ -44,13 +44,12 @@ function getRedactFields() {
 function redact(obj) {
   if (!obj || typeof obj !== 'object') return obj;
   const fields = getRedactFields();
-  const result = { ...obj };
-  for (const key of Object.keys(result)) {
-    if (fields.includes(key)) {
-      result[key] = '[REDACTED]';
-    }
+  if (process.env.LOG_REDACT_FIELDS) {
+    return Object.fromEntries(Object.entries(obj).map(([key, value]) => [
+      key, fields.includes(key) ? '[REDACTED]' : redactLogValue(value),
+    ]));
   }
-  return result;
+  return redactLogValue(obj);
 }
 
 function redactHeaders(headers) {
@@ -72,15 +71,20 @@ function generateRequestId() {
 function requestLogger() {
   return (req, res, next) => {
     const requestId = generateRequestId();
-    const correlationId = generateCorrelationId();
+    // Use the correlation ID already resolved by correlationIdMiddleware when
+    // it is mounted before this logger.  Fall back to generating one here so
+    // requestLogger continues to work correctly in isolation (e.g. unit tests
+    // that mount only this middleware).
+    const correlationId = req.correlationId || generateCorrelationId();
     const startedAt = Date.now();
 
     // Attach to req so downstream handlers can reference it (e.g. error logs)
     req.requestId = requestId;
-    req.correlationId = correlationId;
-
-    // Propagate correlation ID to the response so callers can trace end-to-end
-    res.setHeader('X-Correlation-ID', correlationId);
+    if (!req.correlationId) {
+      // Only set and reflect when correlationIdMiddleware has not already done so.
+      req.correlationId = correlationId;
+      res.setHeader('X-Correlation-ID', correlationId);
+    }
 
     const ip =
       (req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||

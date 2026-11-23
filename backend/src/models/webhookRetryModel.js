@@ -69,10 +69,32 @@ const webhookRetrySchema = new mongoose.Schema(
 
     // Error tracking
     lastError: { type: String, default: null },
+    // responseClass captures the HTTP status class of the most recent failure
+    // so operators can filter retries by '4xx' / '5xx' / 'timeout' / etc.
+    // without parsing lastError strings. Set to null until a delivery attempt
+    // has been made. Values mirror classifyStatus() in webhookMetrics.js.
+    responseClass: {
+      type: String,
+      enum: ['2xx', '4xx', '5xx', 'redirect_blocked', 'timeout', 'ssrf_blocked', 'replay_blocked', 'network_error', null],
+      default: null,
+    },
+    // terminalOutcome is set once the delivery leaves the active retry queue.
+    // Values: 'succeeded' | 'dead_lettered' | 'permanent_error'
+    terminalOutcome: {
+      type: String,
+      enum: ['succeeded', 'dead_lettered', 'permanent_error', null],
+      default: null,
+    },
     errorLog: [
       {
         attemptNumber: Number,
         error: String,
+        // HTTP status code returned by the endpoint on this attempt (null for
+        // network-layer failures such as timeouts or SSRF blocks).
+        statusCode: { type: Number, default: null },
+        // Pre-computed status class for this specific attempt, making
+        // per-attempt analysis queries O(1) without re-parsing error strings.
+        responseClass: { type: String, default: null },
         timestamp: { type: Date, default: Date.now },
       },
     ],

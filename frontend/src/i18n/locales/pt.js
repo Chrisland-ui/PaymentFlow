@@ -56,6 +56,22 @@ const pt = {
     staff: "Status",
   },
 
+  pagination: {
+    label: "Paginação",
+    firstPage: "Primeira página",
+    lastPage: "Última página",
+    previousPage: "Página anterior",
+    nextPage: "Próxima página",
+    firstPageAria: "Ir para a primeira página de {{total}}",
+    lastPageAria: "Ir para a última página de {{total}}",
+    previousPageAria: "Ir para a página anterior (página {{page}} de {{total}})",
+    nextPageAria: "Ir para a próxima página (página {{page}} de {{total}})",
+    pageAria: "Página {{page}} de {{total}}",
+    ellipsis: "Mais páginas",
+    rangeOf: "{{start}}–{{end}} de {{total}} {itemLabel}",
+    shortcutHint: "Pressione g seguido de um número para ir a essa página",
+  },
+
   time: {
     never: "Nunca",
     justNow: "Agora mesmo",
@@ -201,6 +217,27 @@ const pt = {
 
   components: {
     testnetBanner: "TESTNET — Não envie fundos reais",
+  },
+
+  dateRangePicker: {
+    ariaLabel: "Seletor de intervalo de datas",
+    timezoneLabel: "Datas em {{tz}}",
+    changeTimezone: "Alterar fuso horário",
+    hideTimezone: "Ocultar fuso horário",
+    timezoneSelectLabel: "Fuso horário personalizado",
+    presetsLabel: "Intervalos de datas predefinidos",
+    fromLabel: "De",
+    toLabel: "Até",
+    fromAriaLabel: "Data de início",
+    toAriaLabel: "Data de fim",
+    preset: {
+      today: "Hoje",
+      yesterday: "Ontem",
+      last7: "Últimos 7 dias",
+      thisMonth: "Este mês",
+      lastMonth: "Mês passado",
+      custom: "Personalizado",
+    },
   },
 };
 

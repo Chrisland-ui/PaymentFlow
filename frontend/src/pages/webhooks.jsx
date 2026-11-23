@@ -1,12 +1,17 @@
 import { useState, useEffect } from "react";
 import RequireAdmin from "../components/RequireAdmin";
 import PageHero from "../components/PageHero";
+import EmptyState from "../components/EmptyState";
 import { IconAlertTriangle, IconCheck, IconX, IconPlus, IconRefresh } from "../components/Icons";
 import { useTranslation } from "react-i18next";
+import { useAbortController } from "../hooks/useAbortController";
+import { formatRelative } from "../utils/dateTime";
+import { SkeletonTable } from "../components/Skeleton";
 
-async function apiCall(method, path, body = null) {
+async function apiCall(method, path, body = null, signal = undefined) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body) opts.body = JSON.stringify(body);
+  if (signal) opts.signal = signal;
   const res = await fetch(`/api${path}`, opts);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -16,13 +21,7 @@ async function apiCall(method, path, body = null) {
 }
 
 function timeAgo(iso, t) {
-  if (!iso) return t("time.never");
-  const mins = Math.floor((Date.now() - new Date(iso)) / 60000);
-  if (mins < 1) return t("time.justNow");
-  if (mins < 60) return t("time.minutesAgo", { mins });
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return t("time.hoursAgo", { hrs });
-  return new Date(iso).toLocaleDateString();
+  return formatRelative(iso, t);
 }
 
 const EVENT_OPTIONS = [
@@ -52,6 +51,10 @@ function WebhooksPage() {
   const [testingId, setTestingId] = useState(null);
   const [testResults, setTestResults] = useState({});
 
+  // Issue #254 — abort in-flight fetch calls when the component unmounts to
+  // prevent stale responses from applying to the wrong route's state.
+  const { signal } = useAbortController();
+
   useEffect(() => {
     fetchEndpoints();
   }, []);
@@ -60,9 +63,11 @@ function WebhooksPage() {
     setLoading(true);
     setError(null);
     try {
-      const data = await apiCall('GET', '/webhook-endpoints');
+      const data = await apiCall('GET', '/webhook-endpoints', null, signal);
       setEndpoints(data.endpoints || []);
     } catch (err) {
+      // Silently ignore requests cancelled on unmount or navigation.
+      if (err?.name === 'AbortError') return;
       setError(err.message);
     } finally {
       setLoading(false);
@@ -182,9 +187,13 @@ function WebhooksPage() {
           </div>
           <div className="card-body">
             {loading ? (
-              <div className="text-center p-4">{t("webhooks.loading")}</div>
+              <SkeletonTable columns={["100%", 70, 65, 110, 70, 110, 60]} rows={5} className="table table-sm" />
             ) : endpoints.length === 0 ? (
-              <div className="text-center p-4">{t("webhooks.empty")}</div>
+              <EmptyState
+                variant="empty"
+                title={t("webhooks.empty")}
+                description={t("webhooks.emptyDesc")}
+              />
             ) : (
               <div className="table-responsive">
                 <table className="table table-sm">
@@ -194,6 +203,8 @@ function WebhooksPage() {
                       <th>{t("webhooks.colEvents")}</th>
                       <th>{t("webhooks.colStatus")}</th>
                       <th>{t("webhooks.colLastDelivery")}</th>
+                      <th>{t("webhooks.colSuccessRate")}</th>
+                      <th>{t("webhooks.colLastFailure")}</th>
                       <th>{t("webhooks.colActions")}</th>
                     </tr>
                   </thead>
@@ -212,7 +223,13 @@ function WebhooksPage() {
                           </span>
                         </td>
                         <td>
-                          <small>{timeAgo(ep.lastDeliveredAt || ep.createdAt, t)}</small>
+                          <small>{ep.deliveryStats?.lastDeliveryAt ? timeAgo(ep.deliveryStats.lastDeliveryAt, t) : t("webhooks.noDeliveries")}</small>
+                        </td>
+                        <td>
+                          <small>{ep.deliveryStats?.successRate == null ? t("webhooks.noDeliveries") : `${ep.deliveryStats.successRate}%`}</small>
+                        </td>
+                        <td>
+                          <small>{ep.deliveryStats?.lastFailureAt ? timeAgo(ep.deliveryStats.lastFailureAt, t) : t("webhooks.neverFailed")}</small>
                         </td>
                         <td>
                           <div className="btn-group btn-group-sm">

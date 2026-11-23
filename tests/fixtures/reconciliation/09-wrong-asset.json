@@ -1,0 +1,33 @@
+{
+  "id": "scenario-09-wrong-asset-usdc-expected-xlm-received",
+  "description": "School only accepts USDC but the payer sent XLM. On-chain the payment exists; backend must record it as unsupported_asset and not credit the student.",
+  "contractState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000009",
+    "status": "confirmed",
+    "amount": "500.0000000",
+    "asset": "XLM",
+    "from": "GPARENT9AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "to":   "GSCHOOL2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "memo": "STU009",
+    "ledger": 1090,
+    "createdAt": "2026-10-09T16:00:00.000Z"
+  },
+  "schoolConfig": {
+    "acceptedAssets": ["USDC"],
+    "usdcIssuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+  },
+  "backendState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000009",
+    "status": "failed",
+    "errorCode": "UNSUPPORTED_ASSET",
+    "amount": 500,
+    "studentId": "STU009",
+    "confirmedAt": null
+  },
+  "expectedOutcome": {
+    "action": "none",
+    "finalBackendStatus": "failed",
+    "divergence": false,
+    "divergenceType": "unsupported_asset"
+  }
+}

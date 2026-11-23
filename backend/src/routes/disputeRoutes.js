@@ -7,6 +7,7 @@ const { flagDispute, getDisputes, getDisputeById, resolveDispute, addEvidence } 
 const { resolveSchool } = require('../middleware/schoolContext');
 const { requireAdminAuth } = require('../middleware/auth');
 const { auditContext } = require('../middleware/auditContext');
+const { validateCreateDispute, validatePagination } = require('../middleware/validate');
 
 // All dispute routes require school context
 router.use(resolveSchool);
@@ -14,8 +15,8 @@ router.use(resolveSchool);
 // Anyone with school context can raise or view disputes
 // auditContext uses req.admin which may not be present for unauthenticated flagDispute;
 // the audit helper in the controller gracefully skips when req.auditContext is absent.
-router.post('/',        auditContext, flagDispute);
-router.get('/',         getDisputes);
+router.post('/',        validateCreateDispute, auditContext, flagDispute);
+router.get('/',         validatePagination, getDisputes);
 router.get('/:id',      getDisputeById);
 
 // Only admins can update dispute status / resolve / add evidence

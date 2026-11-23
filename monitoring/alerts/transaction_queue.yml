@@ -20,3 +20,4 @@ groups:
             the configured alert threshold for 5 minutes. Check the BullMQ
             worker's liveness (see /health workers.transactionQueueWorker) and
             whether Horizon or MongoDB latency is the bottleneck.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/operator-runbooks.md#redis-or-queue-down"

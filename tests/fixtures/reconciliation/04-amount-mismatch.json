@@ -1,0 +1,31 @@
+{
+  "id": "scenario-04-amount-mismatch",
+  "description": "On-chain amount differs from what the backend recorded — reconciliation should flag the discrepancy without silently overwriting either value.",
+  "contractState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000004",
+    "status": "confirmed",
+    "amount": "300.0000000",
+    "asset": "XLM",
+    "from": "GPARENT4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "to":   "GSCHOOL1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "memo": "STU004",
+    "ledger": 1040,
+    "createdAt": "2026-10-04T11:00:00.000Z"
+  },
+  "backendState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000004",
+    "status": "confirmed",
+    "amount": 250,
+    "studentId": "STU004",
+    "confirmedAt": "2026-10-04T11:00:08.000Z"
+  },
+  "expectedOutcome": {
+    "action": "flag",
+    "finalBackendStatus": "confirmed",
+    "divergence": true,
+    "divergenceType": "amount_mismatch",
+    "onChainAmount": 300,
+    "backendAmount": 250,
+    "alertRequired": true
+  }
+}

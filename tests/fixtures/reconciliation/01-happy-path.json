@@ -1,0 +1,27 @@
+{
+  "id": "scenario-01-happy-path",
+  "description": "Happy path: on-chain confirmed, backend payment confirmed — no action needed.",
+  "contractState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000001",
+    "status": "confirmed",
+    "amount": "250.0000000",
+    "asset": "XLM",
+    "from": "GPARENT1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "to":   "GSCHOOL1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "memo": "STU001",
+    "ledger": 1010,
+    "createdAt": "2026-10-01T10:00:00.000Z"
+  },
+  "backendState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000001",
+    "status": "confirmed",
+    "amount": 250,
+    "studentId": "STU001",
+    "confirmedAt": "2026-10-01T10:00:05.000Z"
+  },
+  "expectedOutcome": {
+    "action": "none",
+    "finalBackendStatus": "confirmed",
+    "divergence": false
+  }
+}

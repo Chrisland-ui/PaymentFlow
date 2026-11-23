@@ -5,6 +5,7 @@ const Payment = require('../models/paymentModel');
 const Outbox = require('../models/outboxModel');
 const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger').child('RefundService');
+const { transition: transitionPayment } = require('./paymentTransitionService');
 const { amountsEqual } = require('../utils/stellarAmount');
 const lock = require('./distributedLock');
 
@@ -72,12 +73,12 @@ async function initiateRefund(schoolId, originalTxHash, studentId, amount, reaso
       initiatedBy,
     });
 
-    // Update payment status to REFUNDED to reflect the in-flight refund.
-    // Uses adminOverride to allow the SUCCESS → REFUNDED transition via the proper
-    // .save() path (mirroring how dispute resolution handles payment status sync).
-    payment.$locals.adminOverride = true;
-    payment.status = 'REFUNDED';
-    await payment.save();
+    await transitionPayment(payment, 'REFUNDED', {
+      adminOverride: true,
+      performedBy: initiatedBy,
+      schoolId,
+      reason: 'Refund initiated',
+    });
 
     const eventId = uuidv4();
     await Outbox.create({

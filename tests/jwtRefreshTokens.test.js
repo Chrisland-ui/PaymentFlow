@@ -156,12 +156,14 @@ describe('#595 JWT refresh token flow', () => {
     it('invalidates the refresh token so it cannot be reused', async () => {
       const loginRes = mockRes();
       await handleLogin({ body: { username: 'admin', password: 'correct-password' } }, loginRes);
-      const { refreshToken } = loginRes.json.mock.calls[0][0];
+      // Tokens are delivered exclusively via HttpOnly cookies (#821).
+      const refreshCookieCall = loginRes.cookie.mock.calls.find(c => c[0] === 'admin_refresh_token');
+      const refreshToken = refreshCookieCall[1];
 
-      await handleLogout({ body: { refreshToken } }, mockRes());
+      await handleLogout({ body: {}, cookies: { admin_refresh_token: refreshToken } }, mockRes());
 
       const refreshRes = mockRes();
-      await handleRefresh({ body: { refreshToken } }, refreshRes);
+      await handleRefresh({ body: { refreshToken }, cookies: {} }, refreshRes);
       expect(refreshRes.status).toHaveBeenCalledWith(401);
     });
 

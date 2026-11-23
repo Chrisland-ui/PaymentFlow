@@ -28,6 +28,8 @@ const MAX_RETRIES = 5;
  * @param {boolean}  [options.enabled=true]  - Set false to skip connecting (e.g. unauthenticated pages).
  * @param {Function} [options.onEvent]        - Called with (eventType, data) for every non-system event.
  * @returns {{ degraded: boolean, connectionStatus: 'connected'|'reconnecting'|'failed' }}
+ *
+ * @see usePendingPaymentPoller for polling-based updates when SSE is unavailable.
  */
 export function usePaymentEvents({ enabled = true, onEvent } = {}) {
   const [degraded, setDegraded] = useState(false);

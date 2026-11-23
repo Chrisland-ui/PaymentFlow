@@ -1,162 +1,203 @@
 'use strict';
 
 /**
- * tests/issue-120-secret-rotation.test.js
+ * Tests for the secret rotation automation (#120).
  *
- * Verifies that the secret rotation infrastructure added in issue #671 is
- * correctly in place:
- *   - gitleaks configuration exists and contains the Stellar secret key rule
- *   - husky pre-commit hook is installed and references gitleaks
- *   - secret rotation runbook exists and covers all required secret types
- *   - package.json has a `prepare` script that installs husky
- *   - CI workflow includes the gitleaks scan job
+ * Validates:
+ *  - The rotation workflow file exists and is structurally correct
+ *  - The verify-rotation script covers all three rotation types
+ *  - Secrets never appear in workflow logs (no plaintext secret echoing)
+ *  - Rollback runbook exists
+ *  - Each rotation type requires confirmation / dry-run gate
  */
 
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.resolve(__dirname, '..');
+const WORKFLOWS_DIR = path.resolve(__dirname, '../.github/workflows');
+const SCRIPTS_DIR = path.resolve(__dirname, '../scripts');
+const RUNBOOKS_DIR = path.resolve(__dirname, '../docs/runbooks');
 
-describe('issue-120: secret rotation and scanning infrastructure', () => {
-  // ── gitleaks configuration ────────────────────────────────────────────────
-
-  describe('.gitleaks.toml', () => {
-    const configPath = path.join(ROOT, '.gitleaks.toml');
-
-    test('file exists', () => {
-      expect(fs.existsSync(configPath)).toBe(true);
-    });
-
-    test('contains a Stellar secret key rule', () => {
-      const src = fs.readFileSync(configPath, 'utf8');
-      expect(src).toContain('stellar-secret-key');
-    });
-
-    test('Stellar rule regex covers S + 55 Base32 chars', () => {
-      const src = fs.readFileSync(configPath, 'utf8');
-      // The regex must reference [A-Z2-7] (Base32 alphabet) and 55 repetitions
-      expect(src).toMatch(/\[A-Z2-7\]/);
-      expect(src).toContain('{55}');
-    });
-
-    test('extends default gitleaks ruleset', () => {
-      const src = fs.readFileSync(configPath, 'utf8');
-      expect(src).toContain('useDefault = true');
-    });
-
-    test('has a global allowlist excluding test fixtures', () => {
-      const src = fs.readFileSync(configPath, 'utf8');
-      expect(src).toContain('[allowlist]');
-      expect(src).toContain('scanRepoSecrets');
-    });
-  });
-
-  // ── husky pre-commit hook ─────────────────────────────────────────────────
-
-  describe('.husky/pre-commit', () => {
-    const hookPath = path.join(ROOT, '.husky', 'pre-commit');
-
-    test('file exists', () => {
-      expect(fs.existsSync(hookPath)).toBe(true);
-    });
-
-    test('references gitleaks', () => {
-      const src = fs.readFileSync(hookPath, 'utf8');
-      expect(src).toContain('gitleaks');
-    });
-
-    test('uses --staged flag to scan only staged changes', () => {
-      const src = fs.readFileSync(hookPath, 'utf8');
-      expect(src).toContain('--staged');
-    });
-
-    test('references .gitleaks.toml config', () => {
-      const src = fs.readFileSync(hookPath, 'utf8');
-      expect(src).toContain('.gitleaks.toml');
-    });
-
-    test('is executable', () => {
-      const mode = fs.statSync(hookPath).mode;
-      // owner execute bit (0o100)
-      expect(mode & 0o100).toBeTruthy();
-    });
-  });
-
-  // ── package.json prepare script ───────────────────────────────────────────
-
-  describe('package.json', () => {
-    const pkgPath = path.join(ROOT, 'package.json');
-    let pkg;
-
+describe('Secret rotation automation (#120)', () => {
+  describe('secret-rotation.yml workflow', () => {
+    let workflow;
     beforeAll(() => {
-      pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      workflow = fs.readFileSync(
+        path.join(WORKFLOWS_DIR, 'secret-rotation.yml'),
+        'utf8'
+      );
     });
 
-    test('has a prepare script', () => {
-      expect(pkg.scripts).toHaveProperty('prepare');
+    it('workflow file exists', () => {
+      expect(fs.existsSync(path.join(WORKFLOWS_DIR, 'secret-rotation.yml'))).toBe(true);
     });
 
-    test('prepare script installs husky', () => {
-      expect(pkg.scripts.prepare).toContain('husky');
+    it('is triggered only by workflow_dispatch (not push/PR)', () => {
+      expect(workflow).toContain('workflow_dispatch:');
+      expect(workflow).not.toMatch(/on:\s*\n\s*push:/);
     });
 
-    test('husky is listed in devDependencies', () => {
-      expect(pkg.devDependencies).toHaveProperty('husky');
+    it('requires dry_run input with default true', () => {
+      expect(workflow).toContain('dry_run:');
+      expect(workflow).toContain('default: true');
+    });
+
+    it('supports all three rotation types', () => {
+      expect(workflow).toContain('jwt');
+      expect(workflow).toContain('webhook-encryption');
+      expect(workflow).toContain('signer-master');
+    });
+
+    it('uses GitHub Secrets for MONGO_URI (not hardcoded)', () => {
+      expect(workflow).toContain('secrets.MONGO_URI');
+    });
+
+    it('does not echo any secret value in run blocks', () => {
+      // The workflow must not use "echo $JWT_SECRET" or similar patterns
+      // that would expose credential values in CI logs.
+      expect(workflow).not.toMatch(/echo\s+\$\{?\s*(JWT_SECRET|SIGNER_MASTER_KEY|WEBHOOK_SECRET)/);
+      expect(workflow).not.toMatch(/echo\s+\$\{?\s*MONGO_URI/);
+    });
+
+    it('pre-rotation health check aborts if deployment is not ready', () => {
+      expect(workflow).toContain('Pre-rotation health check');
+      expect(workflow).toContain('Aborting');
+    });
+
+    it('references the rotation scripts', () => {
+      expect(workflow).toContain('rotate-jwt-secret.js');
+      expect(workflow).toContain('rotate-webhook-encryption-key.js');
+      expect(workflow).toContain('rotate-signer-master-key.js');
+    });
+
+    it('JWT rotation uses --confirm flag', () => {
+      expect(workflow).toContain('--confirm');
+    });
+
+    it('post-rotation verification step exists', () => {
+      expect(workflow).toContain('Post-rotation rollout verification');
+    });
+
+    it('records audit trail after JWT rotation', () => {
+      expect(workflow).toContain('Rotation audit record');
     });
   });
 
-  // ── CI workflow ───────────────────────────────────────────────────────────
-
-  describe('CI workflow gitleaks job', () => {
-    const workflowPath = path.join(ROOT, '.github', 'workflows', 'ci.yml');
-
-    test('ci.yml exists', () => {
-      expect(fs.existsSync(workflowPath)).toBe(true);
+  describe('verify-rotation.js script', () => {
+    let script;
+    beforeAll(() => {
+      script = fs.readFileSync(
+        path.join(SCRIPTS_DIR, 'verify-rotation.js'),
+        'utf8'
+      );
     });
 
-    test('contains a gitleaks scan job', () => {
-      const src = fs.readFileSync(workflowPath, 'utf8');
-      expect(src).toContain('gitleaks-action');
+    it('script exists', () => {
+      expect(fs.existsSync(path.join(SCRIPTS_DIR, 'verify-rotation.js'))).toBe(true);
     });
 
-    test('gitleaks job is in the ci-gate needs list', () => {
-      const src = fs.readFileSync(workflowPath, 'utf8');
-      expect(src).toContain('secret-scan-gitleaks');
+    it('supports jwt type', () => {
+      expect(script).toMatch(/jwt.*verifyJwt|verifyJwt.*jwt/);
+    });
+
+    it('supports webhook type', () => {
+      expect(script).toMatch(/webhook.*verifyWebhook|verifyWebhook.*webhook/);
+    });
+
+    it('supports signer type', () => {
+      expect(script).toMatch(/signer.*verifySigner|verifySigner.*signer/);
+    });
+
+    it('exports individual verify functions for unit testing', () => {
+      expect(script).toContain('module.exports');
+      expect(script).toContain('verifyJwt');
+      expect(script).toContain('verifyWebhook');
+      expect(script).toContain('verifySigner');
+    });
+
+    it('explicitly states it never logs secret values', () => {
+      expect(script).toMatch(/never prints|never.*log|no.*secret.*value|SECURITY/i);
+    });
+
+    it('exits non-zero on verification failure', () => {
+      expect(script).toContain('process.exit(1)');
+    });
+
+    it('references rollback runbook on failure', () => {
+      expect(script).toContain('secret-rotation-rollback');
     });
   });
 
-  // ── Secret rotation runbook ───────────────────────────────────────────────
-
-  describe('docs/runbooks/secret-rotation.md', () => {
-    const runbookPath = path.join(ROOT, 'docs', 'runbooks', 'secret-rotation.md');
-
-    test('file exists', () => {
-      expect(fs.existsSync(runbookPath)).toBe(true);
+  describe('rollback runbook', () => {
+    let runbook;
+    beforeAll(() => {
+      runbook = fs.readFileSync(
+        path.join(RUNBOOKS_DIR, 'secret-rotation-rollback.md'),
+        'utf8'
+      );
     });
 
-    test('covers JWT secret rotation', () => {
-      const src = fs.readFileSync(runbookPath, 'utf8');
-      expect(src.toLowerCase()).toContain('jwt');
+    it('rollback runbook exists', () => {
+      expect(fs.existsSync(path.join(RUNBOOKS_DIR, 'secret-rotation-rollback.md'))).toBe(true);
     });
 
-    test('covers Stellar signer key rotation', () => {
-      const src = fs.readFileSync(runbookPath, 'utf8');
-      expect(src.toLowerCase()).toContain('stellar');
+    it('covers JWT rollback', () => {
+      expect(runbook).toContain('JWT secret rollback');
     });
 
-    test('covers MongoDB credential rotation', () => {
-      const src = fs.readFileSync(runbookPath, 'utf8');
-      expect(src.toLowerCase()).toContain('mongodb');
+    it('covers webhook encryption key rollback', () => {
+      expect(runbook).toContain('Webhook encryption key rollback');
     });
 
-    test('covers webhook HMAC secret rotation', () => {
-      const src = fs.readFileSync(runbookPath, 'utf8');
-      expect(src.toLowerCase()).toContain('webhook');
+    it('covers signer master key rollback', () => {
+      expect(runbook).toContain('Signer master key rollback');
     });
 
-    test('references the scan-repo-secrets script', () => {
-      const src = fs.readFileSync(runbookPath, 'utf8');
-      expect(src).toContain('scan-repo-secrets');
+    it('documents the apply vs dry-run distinction', () => {
+      expect(runbook).toContain('--apply');
+    });
+
+    it('does not contain any real-format secret values', () => {
+      // Must not contain 48+ character hex or base64 strings that look like real keys.
+      // This regex catches anything that looks like a generated secret value.
+      expect(runbook).not.toMatch(/[A-Fa-f0-9]{48,}/);
+    });
+
+    it('requires recording rollback in incident log', () => {
+      expect(runbook).toMatch(/incident.*log|record.*rollback/i);
+    });
+  });
+
+  describe('existing rotation scripts are unmodified (contract)', () => {
+    const scripts = [
+      'rotate-jwt-secret.js',
+      'rotate-webhook-encryption-key.js',
+      'rotate-signer-master-key.js',
+      'provision-k8s-secrets.sh',
+    ];
+
+    scripts.forEach((script) => {
+      it(`${script} exists`, () => {
+        expect(fs.existsSync(path.join(SCRIPTS_DIR, script))).toBe(true);
+      });
+    });
+
+    it('rotate-jwt-secret.js exports rotate() for unit testing', () => {
+      const content = fs.readFileSync(path.join(SCRIPTS_DIR, 'rotate-jwt-secret.js'), 'utf8');
+      expect(content).toContain('module.exports');
+      expect(content).toContain('rotate');
+    });
+
+    it('rotate-webhook-encryption-key.js exports rotateAll() for unit testing', () => {
+      const content = fs.readFileSync(path.join(SCRIPTS_DIR, 'rotate-webhook-encryption-key.js'), 'utf8');
+      expect(content).toContain('module.exports');
+      expect(content).toContain('rotateAll');
+    });
+
+    it('rotate-signer-master-key.js exports rotateAll() for unit testing', () => {
+      const content = fs.readFileSync(path.join(SCRIPTS_DIR, 'rotate-signer-master-key.js'), 'utf8');
+      expect(content).toContain('module.exports');
+      expect(content).toContain('rotateAll');
     });
   });
 });
