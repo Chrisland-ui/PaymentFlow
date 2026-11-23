@@ -44,7 +44,7 @@ async function processTransactionJob(job) {
 
   // Skip if already recorded
   const existing = await Payment.findOne({ txHash, schoolId, deletedAt: null });
-  if (existing) {
+  if (existing && existing.status !== 'FAILED') {
     logger.info('[TxQueueService] Transaction already processed, skipping', { txHash, correlationId });
     await markResolved(txHash);
     return { skipped: true, txHash };
@@ -95,7 +95,7 @@ async function processTransactionJob(job) {
     confirmedAt:         result.date ? new Date(result.date) : now,
     verifiedAt:          now,
     fiatSnapshot,
-  });
+  }, { allowFailedReplay: true });
 
   // Mark durable record resolved
   await markResolved(txHash);

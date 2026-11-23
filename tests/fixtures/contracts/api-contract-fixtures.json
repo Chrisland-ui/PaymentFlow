@@ -1,0 +1,242 @@
+{
+  "description": "Contract fixtures derived from the OpenAPI/API specification.\n\nThese fixtures represent the canonical shapes the frontend API client must\nbe able to parse without loss of information. Any breaking change to a\nresponse envelope — renamed field, changed type, removed required key —\nwill cause the contract tests to fail CI before the change can be merged.\n\nMaintenance\n-----------\nWhen adding a new endpoint:\n  1. Add a success fixture under the matching path/method in `responses`.\n  2. Add an error fixture for each documented error code.\n  3. Run `npm test tests/apiContractTests.test.js` locally to confirm.\n\nThe `_meta` key is a non-normative comment block; it is stripped before\nfixtures are passed to parser assertions.",
+  "responses": {
+    "GET /students": {
+      "success": {
+        "data": [
+          {
+            "_id": "64a1b2c3d4e5f6a7b8c9d0e1",
+            "studentId": "STU-001",
+            "name": "Alice Example",
+            "class": "Grade 5",
+            "feeAmount": 250,
+            "totalPaid": 250,
+            "remainingBalance": 0,
+            "feePaid": true,
+            "schoolId": "SCH-DEFAULT",
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "updatedAt": "2026-06-01T00:00:00.000Z"
+          }
+        ],
+        "pagination": {
+          "page": 1,
+          "limit": 20,
+          "total": 1,
+          "totalPages": 1,
+          "hasNext": false,
+          "hasPrev": false
+        }
+      },
+      "errors": {
+        "UNAUTHORIZED": {
+          "status": 401,
+          "body": { "error": "Unauthorized", "code": "UNAUTHORIZED" }
+        }
+      }
+    },
+    "POST /students": {
+      "success": {
+        "_id": "64a1b2c3d4e5f6a7b8c9d0e2",
+        "studentId": "STU-002",
+        "name": "Bob Example",
+        "class": "Grade 3",
+        "feeAmount": 200,
+        "totalPaid": 0,
+        "remainingBalance": 200,
+        "feePaid": false,
+        "schoolId": "SCH-DEFAULT",
+        "createdAt": "2026-01-10T00:00:00.000Z",
+        "updatedAt": "2026-01-10T00:00:00.000Z"
+      },
+      "errors": {
+        "VALIDATION_ERROR": {
+          "status": 400,
+          "body": { "error": "name is required", "code": "VALIDATION_ERROR" }
+        },
+        "STUDENT_QUOTA_EXCEEDED": {
+          "status": 422,
+          "body": { "error": "School student quota exceeded", "code": "STUDENT_QUOTA_EXCEEDED" }
+        }
+      }
+    },
+    "GET /payments/instructions/:studentId": {
+      "success": {
+        "walletAddress": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+        "memo": "STU-001",
+        "feeAmount": 250,
+        "currency": "XLM",
+        "acceptedAssets": [
+          { "code": "XLM",  "issuer": null, "type": "native" },
+          { "code": "USDC", "issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN", "type": "credit_alphanum4" }
+        ]
+      },
+      "errors": {
+        "NOT_FOUND": {
+          "status": 404,
+          "body": { "error": "Student not found", "code": "NOT_FOUND" }
+        },
+        "MISSING_SCHOOL_CONTEXT": {
+          "status": 400,
+          "body": { "error": "School context is required", "code": "MISSING_SCHOOL_CONTEXT" }
+        }
+      }
+    },
+    "POST /payments/verify": {
+      "success": {
+        "message": "Payment verified",
+        "status": "SUCCESS",
+        "txHash": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+        "amount": 250,
+        "currency": "XLM",
+        "studentId": "STU-001",
+        "feePaid": true
+      },
+      "errors": {
+        "DUPLICATE_TX": {
+          "status": 409,
+          "body": { "error": "Transaction already processed", "code": "DUPLICATE_TX" }
+        },
+        "TX_FAILED": {
+          "status": 422,
+          "body": { "error": "Transaction failed on-chain", "code": "TX_FAILED" }
+        },
+        "MISSING_MEMO": {
+          "status": 422,
+          "body": { "error": "Transaction memo is missing or invalid", "code": "MISSING_MEMO" }
+        },
+        "INVALID_DESTINATION": {
+          "status": 422,
+          "body": { "error": "Transaction destination does not match school wallet", "code": "INVALID_DESTINATION" }
+        }
+      }
+    },
+    "GET /payments/:studentId": {
+      "success": [
+        {
+          "_id": "64a1b2c3d4e5f6a7b8c9d0e3",
+          "txHash": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+          "amount": 250,
+          "currency": "XLM",
+          "status": "SUCCESS",
+          "studentId": "STU-001",
+          "schoolId": "SCH-DEFAULT",
+          "confirmedAt": "2026-05-01T10:00:00.000Z",
+          "createdAt": "2026-05-01T09:59:00.000Z"
+        }
+      ],
+      "errors": {
+        "NOT_FOUND": {
+          "status": 404,
+          "body": { "error": "Student not found", "code": "NOT_FOUND" }
+        }
+      }
+    },
+    "POST /auth/login": {
+      "success": {
+        "token": "<jwt>",
+        "user": {
+          "_id": "64a1b2c3d4e5f6a7b8c9d0f0",
+          "username": "admin",
+          "role": "admin",
+          "schoolId": "SCH-DEFAULT"
+        }
+      },
+      "errors": {
+        "UNAUTHORIZED": {
+          "status": 401,
+          "body": { "error": "Invalid credentials", "code": "UNAUTHORIZED" }
+        }
+      }
+    },
+    "GET /fees": {
+      "success": {
+        "data": [
+          {
+            "_id": "64a1b2c3d4e5f6a7b8c9d1a0",
+            "schoolId": "SCH-DEFAULT",
+            "className": "Grade 5",
+            "feeAmount": 250,
+            "academicYear": "2026",
+            "isActive": true,
+            "createdAt": "2026-01-01T00:00:00.000Z"
+          }
+        ],
+        "pagination": {
+          "page": 1,
+          "limit": 20,
+          "total": 1,
+          "totalPages": 1,
+          "hasNext": false,
+          "hasPrev": false
+        }
+      },
+      "errors": {
+        "UNAUTHORIZED": {
+          "status": 401,
+          "body": { "error": "Unauthorized", "code": "UNAUTHORIZED" }
+        }
+      }
+    },
+    "GET /disputes": {
+      "success": {
+        "data": [
+          {
+            "_id": "64a1b2c3d4e5f6a7b8c9d2b0",
+            "studentId": "STU-001",
+            "schoolId": "SCH-DEFAULT",
+            "txHash": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+            "status": "open",
+            "reason": "Payment not reflected in balance",
+            "createdAt": "2026-05-02T00:00:00.000Z"
+          }
+        ],
+        "pagination": {
+          "page": 1,
+          "limit": 20,
+          "total": 1,
+          "totalPages": 1,
+          "hasNext": false,
+          "hasPrev": false
+        }
+      }
+    },
+    "GET /audit": {
+      "success": {
+        "logs": [
+          {
+            "_id": "64a1b2c3d4e5f6a7b8c9d3c0",
+            "schoolId": "SCH-DEFAULT",
+            "action": "payment_verify",
+            "performedBy": "admin",
+            "targetId": "STU-001",
+            "result": "success",
+            "createdAt": "2026-05-01T10:01:00.000Z"
+          }
+        ],
+        "pagination": {
+          "page": 1,
+          "limit": 50,
+          "total": 1,
+          "totalPages": 1,
+          "hasNext": false,
+          "hasPrev": false
+        }
+      }
+    },
+    "GET /health": {
+      "success": {
+        "status": "ok",
+        "logLevel": "info"
+      },
+      "degraded": {
+        "status": "degraded",
+        "details": { "horizon": "unreachable" },
+        "logLevel": "warn"
+      }
+    },
+    "_errorEnvelope": {
+      "_meta": "Every error response in the API follows this envelope shape",
+      "shape": { "error": "string", "code": "string" }
+    }
+  }
+}

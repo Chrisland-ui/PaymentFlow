@@ -69,6 +69,13 @@ jest.mock('../frontend/src/i18n', () => ({
 // ── Silence clipboard & XMLSerializer (not available in jsdom) ───────────────
 
 beforeAll(() => {
+  // jsdom does not expose TextEncoder globally; polyfill it so that
+  // stellarMemo.js (which calls new TextEncoder().encode()) works in tests.
+  if (typeof global.TextEncoder === 'undefined') {
+    const { TextEncoder, TextDecoder } = require('util');
+    global.TextEncoder = TextEncoder;
+    global.TextDecoder = TextDecoder;
+  }
   Object.assign(navigator, {
     clipboard: { writeText: jest.fn().mockResolvedValue(undefined) },
   });

@@ -14,6 +14,7 @@ StellarEduPay uses the **Stellar Horizon API** to read blockchain transactions �
 - [How verifyTransaction Works](#how-verifytransaction-works)
 - [Fee Validation](#fee-validation)
 - [Confirmation Threshold & Finality State Machine](#confirmation-threshold--finality-state-machine)
+- [Submit Path — SUBMITTED Status & Ledger Finality Polling](#submit-path--submitted-status--ledger-finality-polling)
 - [Fraud & Anomaly Detection](#fraud--anomaly-detection)
 - [Retry Behaviour](#retry-behaviour)
 - [Verifying a Payment Independently](#verifying-a-payment-independently)
@@ -461,6 +462,35 @@ Unit tests for the state machine (including re-poll idempotency) live in `backen
 
 ---
 
+## Submit Path — SUBMITTED Status & Ledger Finality Polling
+
+When a parent submits a signed XDR via `POST /api/payments/submit`, the payment
+moves through an additional intermediate status:
+
+```
+PENDING → SUBMITTED → SUCCESS
+                    ↘ FAILED  (TX_FAILED_ON_CHAIN / FINALITY_TIMEOUT / STELLAR_NETWORK_ERROR)
+```
+
+`SUBMITTED` is persisted **before** the Horizon broadcast so a server crash is
+recoverable. After a successful broadcast, `pollForLedgerInclusion` polls Horizon
+with exponential backoff until the transaction appears in a closed ledger at
+`CONFIRMED` depth or above — only then does the status advance to `SUCCESS`.
+
+**Expected confirmation latency:**
+
+| Percentile | Latency |
+|------------|---------|
+| P50 | 5–10 s |
+| P99 | 30–45 s |
+| Timeout | 5 min (configurable) |
+
+For the complete polling algorithm, failure reason codes, operator runbook for
+`FINALITY_TIMEOUT` payments, and tuning guidance see
+**[`docs/stellar-finality-policy.md`](stellar-finality-policy.md)**.
+
+---
+
 ## Fraud & Anomaly Detection
 
 ### Memo collision
@@ -535,3 +565,58 @@ Any transaction can be verified on a public Stellar explorer without using this 
 - Mainnet: https://stellar.expert/explorer/public
 
 Search by transaction hash or the school wallet address to see the full on-chain record.
+
+---
+
+## Deterministic Test Fixtures
+
+Integration tests that create Stellar accounts ad hoc are difficult to reproduce.
+The `tests/fixtures/contractFixtureAccounts.js` module provides deterministic
+fixture accounts derived from a seed string using Node.js built-in `crypto`.
+
+### Usage
+
+```js
+const { createFixtureAccounts, createTrustlineConfig } = require('./tests/fixtures/contractFixtureAccounts');
+
+// Same seed → same accounts on every run
+const accounts = createFixtureAccounts('my-test-suite-seed');
+
+console.log(accounts.payer.publicKey);      // G... (56 chars, deterministic)
+console.log(accounts.beneficiary.publicKey); // G... (different key)
+console.log(accounts.arbiter.publicKey);     // G...
+
+// Trustline configuration for XLM and USDC
+const trustlines = createTrustlineConfig(accounts);
+```
+
+### Seed behaviour
+
+| Seed | Effect |
+|------|--------|
+| Same seed, same run | Identical accounts |
+| Same seed, different run | Identical accounts (deterministic) |
+| Different seed | Completely different accounts |
+| `FIXTURE_SEED_DEFAULT` | Stable default for shared fixtures |
+
+### Network guard
+
+The fixture module **throws a `NetworkGuardError`** if `STELLAR_NETWORK=mainnet`
+or `STELLAR_NETWORK=public` is set. This prevents fixture accounts from being
+created against production networks accidentally.
+
+```bash
+# Safe — testnet
+STELLAR_NETWORK=testnet node my-test.js
+
+# Safe — unset (defaults to non-production behaviour)
+node my-test.js
+
+# BLOCKED — throws NetworkGuardError
+STELLAR_NETWORK=mainnet node my-test.js
+```
+
+### Secrets are runtime-derived
+
+Secret keys are never hardcoded. They are derived at runtime using `crypto.createHmac`
+over the seed and role label. A different seed produces completely different key material.

@@ -1,3 +1,19 @@
+# PodDisruptionBudget for the backend API server.
+#
+# Guarantees at least 1 backend pod remains available during any voluntary
+# disruption: node drain, cluster autoscaler scale-down, or managed-cluster
+# upgrades. This ensures the payment API is never fully taken offline by
+# routine maintenance operations.
+#
+# Sizing rationale:
+#   backend-deployment.yaml sets replicas: 2 (minReplicas: 2 in HPA).
+#   minAvailable: 1 allows Kubernetes to voluntarily evict exactly one pod
+#   at a time, while the other continues to serve traffic. The remaining pod
+#   is behind the Service load balancer and handles requests until the
+#   replacement pod passes its readiness probe (/health/ready).
+#
+# Do NOT set minAvailable equal to replicas — that would block all voluntary
+# disruptions and cause node drains to hang indefinitely.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -5,10 +21,6 @@ metadata:
   labels:
     app: backend
 spec:
-  # backend-deployment.yaml runs replicas: 2 — require at least one pod to stay
-  # available during any voluntary disruption (node drain, cluster autoscaler
-  # scale-down, managed-cluster upgrade) so routine maintenance can never take
-  # the payment backend fully offline.
   minAvailable: 1
   selector:
     matchLabels:

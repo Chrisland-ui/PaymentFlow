@@ -20,3 +20,4 @@ groups:
             ({{ $value | printf "%.2f" }}s). Check Horizon polling latency
             (horizon_request_duration_seconds) and the transaction retry queue
             depth (queue_depth{queue="transaction-retry"}).
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#paymentprocessinglatencyhigh"

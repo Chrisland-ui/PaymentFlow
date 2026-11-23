@@ -14,6 +14,11 @@ spec:
       labels:
         app: backend
     spec:
+      # Allow 60 s for in-flight requests + queue drain on SIGTERM before
+      # Kubernetes sends SIGKILL.  Must be > SHUTDOWN_TIMEOUT_MS (default 30 s)
+      # so the app can drain gracefully.  Set conservatively at 75 s to leave a
+      # margin for slow requests.
+      terminationGracePeriodSeconds: 75
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001
@@ -61,22 +66,56 @@ spec:
                   key: MONGO_URI
             - name: REDIS_HOST
               value: "redis"
+
+          # ── startupProbe ────────────────────────────────────────────────────
+          # Absorbs the Node.js cold-start + MongoDB connection establishment
+          # before liveness probes kick in.  failureThreshold * periodSeconds
+          # = 120 s maximum startup budget.  Once the app returns a non-5xx on
+          # /health/live, the startupProbe succeeds and Kubernetes hands off to
+          # the liveness and readiness probes below.
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 24   # 24 × 5 s = 120 s max startup budget
+
+          # ── livenessProbe ───────────────────────────────────────────────────
+          # Checks only that the Node.js process is alive and responsive.
+          # Uses /health/live which returns 200 as long as the process is
+          # running, even when MongoDB or Redis is temporarily degraded.
+          # A failure here triggers a pod restart — reserved for true hangs or
+          # crashes, NOT for downstream dependency outages.
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 5000
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+
+          # ── readinessProbe ──────────────────────────────────────────────────
+          # Checks all dependencies (MongoDB, Redis, Horizon) before allowing
+          # traffic.  Uses /health/ready which returns 200 only when the app
+          # considers itself fit for traffic.  A failure here removes the pod
+          # from the Service endpoints — the pod is not restarted, giving the
+          # dependency time to recover.  This prevents the load balancer from
+          # routing payment requests to a pod whose upstream connections are not
+          # ready.
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health/ready
               port: 5000
-            initialDelaySeconds: 30
+            initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 5000
-            initialDelaySeconds: 60
-            periodSeconds: 30
-            timeoutSeconds: 5
-            failureThreshold: 3
+            successThreshold: 1
+
+          # See docs/k8s-resource-sizing.md for sizing rationale.
           resources:
             requests:
               cpu: "250m"
@@ -84,3 +123,11 @@ spec:
             limits:
               cpu: "1000m"
               memory: "512Mi"
+
+          # ── lifecycle.preStop ───────────────────────────────────────────────
+          # Gives ingress / kube-proxy time to deregister the pod endpoint before
+          # the container receives SIGTERM and begins graceful shutdown draining.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]

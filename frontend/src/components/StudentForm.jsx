@@ -7,7 +7,7 @@ import { getErrorMessage } from "../utils/errorMessages";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-export default function StudentForm({ student, onClose, onSave }) {
+export default function StudentForm({ student, onClose, onSave, onOptimisticUpdate, onRollback }) {
   const { t } = useTranslation();
   const [formData, setFormData] = useState({
     name: "",
@@ -56,6 +56,7 @@ export default function StudentForm({ student, onClose, onSave }) {
     setLoading(true);
 
     try {
+      onOptimisticUpdate?.(student.studentId, formData);
       await updateStudent(student.studentId, formData);
       setSuccess(t("studentForm.updateSuccess"));
       setTimeout(() => {
@@ -64,7 +65,9 @@ export default function StudentForm({ student, onClose, onSave }) {
       }, 1000);
     } catch (err) {
       const data = err.response?.data;
-      setError(getErrorMessage(data?.code, data?.error) || t("studentForm.updateFailed"));
+      const message = getErrorMessage(data?.code, data?.error) || t("studentForm.updateFailed");
+      setError(message);
+      onRollback?.(message);
     } finally {
       setLoading(false);
     }

@@ -20,6 +20,7 @@ groups:
             2=connecting, 3=disconnecting). Payment reads and writes are
             failing. Check MongoDB Atlas/replica-set health and network
             connectivity from the backend.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/operator-runbooks.md#mongo-or-database-down"
 
       # ── Warning: driver reporting connection errors ───────────────────────
       # mongodb_connection_errors_total increments on every 'error' event from
@@ -39,3 +40,4 @@ groups:
             unstable even though mongodb_connection_state still reads
             "connected". Check application logs for "[MongoDB] Connection
             error" entries.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/operator-runbooks.md#mongo-or-database-down"

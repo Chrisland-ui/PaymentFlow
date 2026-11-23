@@ -6,6 +6,7 @@
 
 const crypto = require('crypto');
 const Payment = require('../models/paymentModel');
+const { encodeListCursor, decodeListCursor, cursorCondition } = require('../utils/listCursor');
 const Student = require('../models/studentModel');
 const PendingVerification = require('../models/pendingVerificationModel');
 const { ACCEPTED_ASSETS } = require('../config/stellarConfig');
@@ -129,12 +130,55 @@ async function getAllPayments(req, res, next) {
 
     const pageNum = Math.max(1, parseInt(page, 10));
     const pageSize = Math.min(100, Math.max(1, parseInt(limit, 10)));
-    const skip = (pageNum - 1) * pageSize;
+    const legacyOffset = req.legacyOffsetPagination && !req.query.cursor;
+    let payments;
+    let pagination;
 
-    const [payments, total] = await Promise.all([
-      Payment.find(filter).sort({ confirmedAt: -1 }).skip(skip).limit(pageSize).lean(),
-      Payment.countDocuments(filter),
-    ]);
+    if (legacyOffset) {
+      const skip = (pageNum - 1) * pageSize;
+      const [offsetPayments, total] = await Promise.all([
+        Payment.find(filter).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(pageSize).lean(),
+        Payment.countDocuments(filter),
+      ]);
+      payments = offsetPayments;
+      pagination = {
+        page: pageNum,
+        limit: pageSize,
+        total,
+        totalPages: Math.ceil(total / pageSize),
+        hasNext: pageNum < Math.ceil(total / pageSize),
+        hasPrev: pageNum > 1,
+      };
+    } else {
+      const cursorFilters = {
+        schoolId,
+        startDate: startDate || null,
+        endDate: endDate || null,
+        minAmount: minAmount || null,
+        maxAmount: maxAmount || null,
+        status: status || null,
+        studentId: studentId || null,
+        isSuspicious: isSuspicious ?? null,
+      };
+      const cursorPayload = req.query.cursor ? decodeListCursor(req.query.cursor, cursorFilters) : null;
+      const cursorFilter = cursorPayload
+        ? { $and: [filter, cursorCondition(cursorPayload)] }
+        : filter;
+      const results = await Payment.find(cursorFilter)
+        .sort({ createdAt: -1, _id: -1 })
+        .limit(pageSize + 1)
+        .lean();
+      const hasNextPage = results.length > pageSize;
+      payments = results.slice(0, pageSize);
+      pagination = {
+        limit: pageSize,
+        nextCursor: hasNextPage && payments.length
+          ? encodeListCursor(payments[payments.length - 1], cursorFilters)
+          : null,
+        hasPreviousPage: Boolean(cursorPayload),
+        hasNextPage,
+      };
+    }
 
     const enrichedPayments = payments.map((p) => ({
       ...p,
@@ -144,16 +188,12 @@ async function getAllPayments(req, res, next) {
 
     res.json({
       payments: enrichedPayments,
-      pagination: {
-        page: pageNum,
-        limit: pageSize,
-        total,
-        totalPages: Math.ceil(total / pageSize),
-        hasNext: pageNum < Math.ceil(total / pageSize),
-        hasPrev: pageNum > 1,
-      },
+      pagination,
     });
   } catch (err) {
+    if (err.code === 'INVALID_CURSOR') {
+      return res.status(400).json({ error: err.message, code: 'INVALID_CURSOR' });
+    }
     next(err);
   }
 }

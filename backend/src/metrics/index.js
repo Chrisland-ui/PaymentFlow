@@ -117,6 +117,11 @@ new client.Gauge({
         // Dead-lettered jobs land as waiting in the DLQ (no DLQ worker drains them).
         this.set({ queue: 'transaction-dead-letter' }, (m.waiting || 0) + (m.failed || 0));
       }
+
+      const genericDepths = await require('../queue/deadLetterQueue').getDeadLetterDepths();
+      for (const [queueName, depth] of Object.entries(genericDepths)) {
+        this.set({ queue: `${queueName}-dead-letter` }, depth);
+      }
     } catch (_) {
       // Redis may not be configured — scrape still succeeds
     }
@@ -193,6 +198,18 @@ const stuckPaymentsGauge = new client.Gauge({
       // DB may not be ready yet — scrape still succeeds with stale/zero values
     }
   },
+});
+
+const paymentReconciliationMismatchRate = new client.Gauge({
+  name: 'payment_reconciliation_mismatch_rate',
+  help: 'Mismatch rate of the most recent scheduled payment reconciliation run',
+  registers: [registry],
+});
+
+const paymentReconciliationMismatchThreshold = new client.Gauge({
+  name: 'payment_reconciliation_mismatch_threshold',
+  help: 'Configured payment reconciliation mismatch alert threshold',
+  registers: [registry],
 });
 
 // suspicious_payment_flagged{school_id} — counter of payments flagged as
@@ -275,9 +292,33 @@ const horizonRequestDurationSeconds = new client.Histogram({
 // outcomes: 'success' (HTTP 2xx), 'failure' (error or non-2xx), 'retry' (queued for retry).
 const webhookDeliveryTotal = new client.Counter({
   name: 'webhook_delivery_total',
-  help: 'Number of webhook delivery attempts grouped by outcome (success, failure, retry)',
-  labelNames: ['outcome'],
+  help: 'Number of webhook delivery attempts grouped by status',
+  labelNames: ['status'],
   registers: [registry],
+});
+
+const webhookEndpointConsecutiveFailures = new client.Gauge({
+  name: 'webhook_endpoint_consecutive_failures',
+  help: 'Current consecutive failure count for each webhook endpoint',
+  labelNames: ['school_id', 'endpoint_id'],
+  registers: [registry],
+  async collect() {
+    try {
+      const WebhookEndpoint = require('../models/webhookEndpointModel');
+      const endpoints = await WebhookEndpoint.find({ consecutiveFailures: { $gt: 0 } })
+        .select('schoolId consecutiveFailures')
+        .lean();
+      this.reset();
+      for (const endpoint of endpoints) {
+        this.set(
+          { school_id: endpoint.schoolId, endpoint_id: String(endpoint._id) },
+          endpoint.consecutiveFailures || 0
+        );
+      }
+    } catch (_) {
+      // Database may be unavailable during startup; keep the scrape healthy.
+    }
+  },
 });
 
 // notification_sent_total{channel} — counts outbound notifications by channel.
@@ -520,6 +561,65 @@ function recordBackupRestoreTestSuccess(timestampSeconds = Math.floor(Date.now()
   _lastBackupRestoreTestSuccessAt = timestampSeconds;
 }
 
+// ── Cache Metrics (Issue #38) ─────────────────────────────────────────────────
+// Explicitly distinguishes normal cache misses from dependency outage degradations.
+const cacheOperationsTotal = new client.Counter({
+  name: 'cache_operations_total',
+  help: 'Total cache operations categorized by result (hit, miss, outage)',
+  labelNames: ['cache', 'result'],
+  registers: [registry],
+});
+
+const cacheHitsTotal = new client.Counter({
+  name: 'cache_hits_total',
+  help: 'Total number of successful cache hits',
+  labelNames: ['cache'],
+  registers: [registry],
+});
+
+const cacheMissesTotal = new client.Counter({
+  name: 'cache_misses_total',
+  help: 'Total number of normal cache misses (key not present)',
+  labelNames: ['cache'],
+  registers: [registry],
+});
+
+const cacheOutagesTotal = new client.Counter({
+  name: 'cache_outages_total',
+  help: 'Total number of cache read/write failures due to Redis outage or timeout',
+  labelNames: ['cache'],
+  registers: [registry],
+});
+
+const redisConnected = new client.Gauge({
+  name: 'redis_connected',
+  help: 'Redis connection status (1 = connected/ready, 0 = unavailable/disabled)',
+  registers: [registry],
+  collect() {
+    try {
+      const { isRedisReady } = require('../config/redisClient');
+      this.set(isRedisReady() ? 1 : 0);
+    } catch (_) {
+      this.set(0);
+    }
+  },
+});
+
+function recordCacheHit(cacheName = 'default') {
+  cacheOperationsTotal.inc({ cache: cacheName, result: 'hit' });
+  cacheHitsTotal.inc({ cache: cacheName });
+}
+
+function recordCacheMiss(cacheName = 'default') {
+  cacheOperationsTotal.inc({ cache: cacheName, result: 'miss' });
+  cacheMissesTotal.inc({ cache: cacheName });
+}
+
+function recordCacheOutage(cacheName = 'default') {
+  cacheOperationsTotal.inc({ cache: cacheName, result: 'outage' });
+  cacheOutagesTotal.inc({ cache: cacheName });
+}
+
 module.exports = {
   registry,
   mongoConnectionState,
@@ -544,9 +644,12 @@ module.exports = {
   paymentBatchItemsTotal,
   paymentBatchDurationSeconds,
   stuckPaymentsGauge,
+  paymentReconciliationMismatchRate,
+  paymentReconciliationMismatchThreshold,
   paymentFunnelTotal,
   horizonRequestDurationSeconds,
   webhookDeliveryTotal,
+  webhookEndpointConsecutiveFailures,
   notificationSentTotal,
   backupLastSuccessTimestamp,
   horizonUnreachableSince,
@@ -556,4 +659,12 @@ module.exports = {
   recordBackupVerificationSuccess,
   lastBackupRestoreTestAgeSeconds,
   recordBackupRestoreTestSuccess,
+  cacheOperationsTotal,
+  cacheHitsTotal,
+  cacheMissesTotal,
+  cacheOutagesTotal,
+  redisConnected,
+  recordCacheHit,
+  recordCacheMiss,
+  recordCacheOutage,
 };

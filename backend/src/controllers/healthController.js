@@ -6,9 +6,10 @@ const config = require('../config');
 const { getReminderStatus } = require('../services/reminderService');
 const { getCachedRates } = require('../services/currencyConversionService');
 const { getAuditHealth } = require('../services/auditService');
-const { getRedisStatus } = require('../config/redisClient');
+const { getRedisStatus, checkRedis, isRedisRequired } = require('../config/redisClient');
 const { checkLiveness, WORKER_NAMES } = require('../services/workerHeartbeat');
 const { getRecoveryStatus } = require('../queue/transactionQueue');
+const { getHealthSummary: getProviderCircuitBreakerSummary } = require('../services/providerCircuitBreakerRegistry');
 const logger = require('../utils/logger');
 const { isReady: isShutdownReady } = require('../services/shutdownManager');
 
@@ -53,9 +54,10 @@ async function checkStellar() {
 }
 
 async function healthCheck(req, res) {
-  const [dbResult, stellarResult] = await Promise.allSettled([
+  const [dbResult, stellarResult, redisProbeResult] = await Promise.allSettled([
     database.healthCheck(),
     checkStellar(),
+    checkRedis(),
   ]);
 
   const db =
@@ -68,10 +70,20 @@ async function healthCheck(req, res) {
       ? stellarResult.value
       : { status: 'unreachable', error: stellarResult.reason?.message };
 
+  const redisProbe =
+    redisProbeResult.status === 'fulfilled'
+      ? redisProbeResult.value
+      : {
+          configured: Boolean(process.env.REDIS_HOST),
+          status: 'unreachable',
+          error: redisProbeResult.reason?.message,
+          required: isRedisRequired(),
+        };
+
   const retrySelector = require('../services/retryServiceSelector');
   const retryBackend = retrySelector.getSelectedBackend();
   const redisStatus = getRedisStatus();
-  const redisConfigured = Boolean(redisStatus.configured);
+  const redisConfigured = Boolean(redisStatus.configured || redisProbe.configured);
 
   let overallStatus = 'healthy';
   let statusCode = 200;
@@ -89,7 +101,10 @@ async function healthCheck(req, res) {
   if (db.healthy !== true) {
     overallStatus = 'unhealthy';
     statusCode = 503;
-  } else if (redisConfigured && redisStatus.status !== 'ready') {
+  } else if (redisProbe.required && (redisProbe.status !== 'ok' || !redisProbe.configured)) {
+    overallStatus = 'unhealthy';
+    statusCode = 503;
+  } else if (redisConfigured && (redisStatus.status !== 'ready' || redisProbe.status !== 'ok')) {
     overallStatus = 'degraded';
     statusCode = 200;
   } else if (stellar.status !== 'ok' || horizonUnreachableTooLong) {
@@ -170,6 +185,13 @@ async function healthCheck(req, res) {
     };
   });
 
+  // Provider circuit breaker status — surface open/half-open breakers as degraded
+  // so on-call engineers can see which provider is down without checking Prometheus.
+  const providerCBSummary = getProviderCircuitBreakerSummary();
+  if (!providerCBSummary.allHealthy && overallStatus === 'healthy') {
+    overallStatus = 'degraded';
+  }
+
   const body = {
     status: overallStatus,
     timestamp: new Date().toISOString(),
@@ -203,6 +225,15 @@ async function healthCheck(req, res) {
         maxQueueDepth,
       },
       reminders: getReminderStatus(),
+      redis: {
+        configured: redisProbe.configured,
+        status: redisProbe.status,
+        required: redisProbe.required,
+        ...(redisProbe.latencyMs !== undefined && { latency_ms: redisProbe.latencyMs }),
+        ...(redisProbe.error && { error: redisProbe.error }),
+        ...(redisProbe.host && { host: redisProbe.host }),
+        ...(redisProbe.port && { port: redisProbe.port }),
+      },
       retryQueue: {
         status: retryQueueStatus,
         backend: retryBackend || 'not_started',
@@ -218,6 +249,7 @@ async function healthCheck(req, res) {
       },
       auditLog: getAuditHealth(),
       jobRecovery,
+      providerCircuitBreakers: providerCBSummary,
       workers: {
         healthy: workerLiveness.allHealthy,
         detail: workerLiveness.workers,
@@ -245,7 +277,7 @@ async function healthLive(req, res) {
 /**
  * GET /health/ready
  * Readiness probe: returns 200 only when the service can handle traffic.
- * Checks DB, Horizon, and shutdown readiness; returns 503 if any is unavailable.
+ * Checks DB, Horizon, Redis (if required), and shutdown readiness; returns 503 if any required dependency is unavailable.
  */
 async function healthReady(req, res) {
   // Check if shutdown has started (readiness flag flipped)
@@ -257,9 +289,10 @@ async function healthReady(req, res) {
     });
   }
 
-  const [dbResult, stellarResult] = await Promise.allSettled([
+  const [dbResult, stellarResult, redisResult] = await Promise.allSettled([
     database.healthCheck(),
     checkStellar(),
+    checkRedis(),
   ]);
 
   const db =
@@ -272,10 +305,26 @@ async function healthReady(req, res) {
       ? stellarResult.value
       : { status: 'unreachable', error: stellarResult.reason?.message };
 
-  const ready = db.healthy === true && stellar.status === 'ok';
+  const redis =
+    redisResult.status === 'fulfilled'
+      ? redisResult.value
+      : {
+          configured: Boolean(process.env.REDIS_HOST),
+          status: 'unreachable',
+          error: redisResult.reason?.message,
+          required: isRedisRequired(),
+        };
+
+  // Readiness reflects required dependencies:
+  // - DB must be healthy
+  // - Stellar must be ok
+  // - Redis: if required (REDIS_REQUIRED=true), Redis must be configured and status 'ok'.
+  //   If Redis is optional (REDIS_REQUIRED=false or unset), an outage does not block readiness.
+  const redisReady = !redis.required || (redis.configured && redis.status === 'ok');
+  const ready = db.healthy === true && stellar.status === 'ok' && redisReady;
   const statusCode = ready ? 200 : 503;
 
-  return res.status(statusCode).json({
+  const responseBody = {
     status: ready ? 'ready' : 'not_ready',
     timestamp: new Date().toISOString(),
     checks: {
@@ -286,8 +335,22 @@ async function healthReady(req, res) {
         endpoints: stellar.endpoints || [],
         ...(stellar.error && { error: stellar.error }),
       },
+      redis: {
+        configured: redis.configured,
+        status: redis.status,
+        required: redis.required,
+        ...(redis.latencyMs !== undefined && { latency_ms: redis.latencyMs }),
+        ...(redis.error && { error: redis.error }),
+      },
     },
-  });
+  };
+
+  if (!redisReady && redis.required) {
+    responseBody.reason = 'required_dependency_unhealthy';
+    responseBody.unhealthyDependency = 'redis';
+  }
+
+  return res.status(statusCode).json(responseBody);
 }
 
 module.exports = { healthCheck, healthLive, healthReady };

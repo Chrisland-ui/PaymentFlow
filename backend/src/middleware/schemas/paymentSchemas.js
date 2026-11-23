@@ -8,10 +8,13 @@
  * or reused directly in unit tests without spinning up an HTTP server.
  *
  * Stellar precision note: XLM and USDC on Stellar both support up to
- * 7 decimal places.  Amounts with more than 7 dp are rejected.
+ * 7 decimal places.  Amounts are validated as decimal strings via
+ * decimalPrecision.js so that floating-point coercion never alters the
+ * value between the API boundary and business logic.
  */
 
 const Joi = require('joi');
+const { decimalAmountJoi, CURRENCY_RULES } = require('../utils/decimalPrecision');
 
 // ── Shared atomic rules ──────────────────────────────────────────────────────
 
@@ -35,36 +38,23 @@ const mongoObjectId = Joi.string()
 const MIN_AMOUNT = 1.0;
 
 /**
- * Validates that a number is:
- *   - a finite positive number > MIN_AMOUNT
+ * Validates that an amount:
+ *   - is supplied as a decimal string or number
+ *   - is positive and >= MIN_AMOUNT
  *   - has at most 7 decimal places (Stellar precision)
+ *   - round-trips exactly through storage and re-parse
+ *
+ * Uses decimalAmountJoi() so the same rules apply to the fee controller and any
+ * future endpoint that accepts monetary values.
  */
-const stellarAmount = Joi.number()
-  .positive()
-  .min(MIN_AMOUNT)
-  .custom((value, helpers) => {
-    // Check decimal precision: multiply by 10^7, compare to floored value
-    if (Math.round(value * 1e7) !== Math.floor(value * 1e7)) {
-      return helpers.error('number.precision');
-    }
-    // Regex approach — stringify and count decimal places
-    const str = value.toString();
-    const dotIndex = str.indexOf('.');
-    if (dotIndex !== -1 && str.length - dotIndex - 1 > 7) {
-      return helpers.error('number.precision');
-    }
-    return value;
-  })
+const stellarAmount = decimalAmountJoi({ currency: 'XLM', minValue: MIN_AMOUNT })
   .messages({
-    'number.base':      '"amount" must be a number',
-    'number.positive':  '"amount" must be a positive number greater than 0',
-    'number.min':       `"amount" must be greater than or equal to ${MIN_AMOUNT} XLM`,
-    'number.precision': '"amount" must not exceed 7 decimal places (Stellar precision)',
-    'any.required':     '"amount" is required',
+    'any.required': '"amount" is required',
+    'any.invalid':  '"amount" {{#reason}}',
   });
 
 /** Whitelisted Stellar asset codes — extend this array as more tokens are accepted. */
-const ALLOWED_CURRENCIES = ['XLM', 'USDC'];
+const ALLOWED_CURRENCIES = Object.keys(CURRENCY_RULES);
 
 const currencyCode = Joi.string()
   .valid(...ALLOWED_CURRENCIES)
@@ -100,10 +90,11 @@ const createPaymentIntentSchema = Joi.object({
  *                    and non-empty.
  */
 const submitTransactionSchema = Joi.object({
-  xdr: Joi.string().trim().min(1).required().messages({
+  xdr: Joi.string().trim().min(1).max(48 * 1024).required().messages({
     'string.base':  '"xdr" must be a string',
     'string.empty': '"xdr" must not be an empty string',
     'string.min':   '"xdr" must not be an empty string',
+    'string.max':   '"xdr" must not exceed 49152 characters',
     'any.required': '"xdr" is required',
   }),
 }).options({ allowUnknown: false, abortEarly: false });

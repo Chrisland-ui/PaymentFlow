@@ -21,6 +21,7 @@ groups:
             Check MongoDB connection health (mongodb_connection_state) and
             Horizon request latency (horizon_request_duration_seconds) for a
             root cause.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#apilatencyp95high"
 
       # ── Critical: p99 latency severely degraded ───────────────────────────
       # p99 above 2.5s (the second-highest configured bucket) means even
@@ -39,3 +40,4 @@ groups:
             above 2.5 seconds for 10 minutes ({{ $value | printf "%.2f" }}s).
             Parent- and admin-facing payment requests are likely timing out or
             about to. Page on-call.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#apilatencyp99critical"

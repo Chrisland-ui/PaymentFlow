@@ -1,5 +1,14 @@
 /** @type {import('next').NextConfig} */
 
+// Validate required public environment variables at build/startup time.
+try {
+  const { validateEnv } = require('./src/config/envValidation');
+  validateEnv();
+} catch (e) {
+  if (process.env.NODE_ENV === 'production') throw e;
+  console.warn('[next.config.js] Environment validation warning:', e.message);
+}
+
 // External-origin allow-lists are defined in a single shared module so that
 // both this file (runtime policy) and tests/csp.test.js (assertions) stay in
 // sync automatically. To add a new origin, edit only cspSources.js.
@@ -8,6 +17,20 @@ const {
   STYLE_SRC_ORIGINS,
   FONT_SRC_ORIGINS,
 } = require('./src/config/cspSources');
+
+// Bundle analysis: set ANALYZE=true to open an interactive Webpack bundle
+// visualiser after `npm run build`.  In CI the visualiser is disabled; the
+// bundle-budget.js script reads the build manifest directly instead.
+const withBundleAnalyzer = (() => {
+  try {
+    // eslint-disable-next-line import/no-extraneous-dependencies
+    return require('@next/bundle-analyzer')({ enabled: process.env.ANALYZE === 'true' });
+  } catch {
+    // @next/bundle-analyzer is an optional dev-dependency; if it is not
+    // installed (e.g. in a minimal Docker image) skip the wrapper entirely.
+    return (cfg) => cfg;
+  }
+})();
 
 const isDev = process.env.NODE_ENV !== 'production';
 
@@ -55,6 +78,8 @@ const CSP = [
 
 const securityHeaders = [
   { key: 'Content-Security-Policy', value: CSP },
+  { key: 'Content-Security-Policy-Report-Only', value: `${CSP}; report-uri /api/csp-report` },
+  { key: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains' },
   { key: 'X-Frame-Options', value: 'DENY' },
   { key: 'X-Content-Type-Options', value: 'nosniff' },
   { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
@@ -86,4 +111,4 @@ const nextConfig = {
   },
 };
 
-module.exports = nextConfig;
+module.exports = withBundleAnalyzer(nextConfig);

@@ -41,3 +41,4 @@ backups/
 test_results.txt
 test_results*.txt
 test_output*.txt
+schema-drift-reports/

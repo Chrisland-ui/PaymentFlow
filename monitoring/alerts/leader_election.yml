@@ -22,6 +22,7 @@ groups:
             them, so reminders and audit events are being duplicated and
             reconciliation may be writing conflicting results. Check Redis
             reachability from every replica and restart the extra leaders.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#leaderelectionspiltbrain"
 
       # ── Critical: nobody is the leader ───────────────────────────────────
       # The mirror image of split brain: no replica holds the lock, so the
@@ -39,6 +40,7 @@ groups:
             Reminder dispatch, reconciliation, and payment finalization are
             not running. Check that Redis is reachable and that at least one
             replica is up.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#leaderelectionnoLeader"
 
       # ── Warning: leadership is churning ──────────────────────────────────
       # A healthy leader renews well inside LEADER_LOCK_TTL_MS and keeps its
@@ -58,3 +60,4 @@ groups:
             it is renewed. Check Redis latency and event-loop lag on the
             replicas, and review LEADER_LOCK_TTL_MS against
             LEADER_RENEW_INTERVAL_MS.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#leaderelectionchurning"

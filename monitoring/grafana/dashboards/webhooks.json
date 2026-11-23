@@ -2,7 +2,7 @@
   "title": "StellarEduPay — Webhooks",
   "uid": "stellaredupay-webhooks",
   "schemaVersion": 36,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
   "panels": [
@@ -75,6 +75,92 @@
         { "id": "labelsToFields", "options": {} },
         { "id": "organize", "options": { "renameByName": { "Value": "failures (1h)" } } }
       ]
+    },
+    {
+      "id": 5,
+      "title": "Failure Rate by Response Class (4xx vs 5xx vs other)",
+      "description": "Breaks down failure rate by HTTP status class. A spike in 4xx indicates permanent client errors (bad payload / auth) that will NOT be retried. A spike in 5xx indicates transient server errors that will be retried with exponential backoff.",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum by (status_class) (rate(webhook_deliveries_total{outcome=\"failure\"}[5m]))",
+          "legendFormat": "{{status_class}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "lineWidth": 2 } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "4xx" },          "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "5xx" },          "properties": [{ "id": "color", "value": { "fixedColor": "red",    "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "timeout" },      "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "network_error" },"properties": [{ "id": "color", "value": { "fixedColor": "purple", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "ssrf_blocked" }, "properties": [{ "id": "color", "value": { "fixedColor": "dark-red","mode": "fixed" } }] }
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "title": "Retry Attempt Distribution",
+      "description": "How many delivery attempts are required. A healthy deployment succeeds on attempt 1. Growth in attempt 2+ indicates degraded endpoints. Growth at the max attempt number indicates deliveries being dead-lettered.",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum by (attempt_number) (rate(webhook_retry_attempt_total[5m]))",
+          "legendFormat": "attempt {{attempt_number}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "lineWidth": 2 } }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Oldest Pending Delivery Age",
+      "description": "Age in seconds of the oldest webhook retry still waiting to be delivered. Alert when this exceeds the max backoff window (~15 min / 900 s), which indicates a stuck or delayed delivery.",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 22, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "webhook_pending_delivery_age_seconds",
+          "legendFormat": "oldest pending (s)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": 0 },
+              { "color": "yellow", "value": 900 },
+              { "color": "red",    "value": 3600 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "Terminal Delivery Outcomes",
+      "description": "Counts of deliveries that reached a terminal state: succeeded (delivered on a retry), dead_lettered (all retries exhausted), or permanent_error (4xx — not retried).",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 22, "w": 16, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum by (terminal_outcome) (rate(webhook_deliveries_terminal_total[5m]))",
+          "legendFormat": "{{terminal_outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "lineWidth": 2 } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "succeeded" },       "properties": [{ "id": "color", "value": { "fixedColor": "green",  "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "dead_lettered" },   "properties": [{ "id": "color", "value": { "fixedColor": "red",    "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "permanent_error" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] }
+        ]
+      }
     }
   ]
 }

@@ -148,9 +148,43 @@ function verifySignatureV2(timestamp, deliveryId, rawBody, providedSignature, se
 }
 
 // ── Backoff ──────────────────────────────────────────────────────────────────
+//
+// Exponential backoff with ±10 % jitter and a hard cap.
+//
+// Base delays follow the original three slots (1 min, 5 min, 15 min) so
+// existing behaviour is preserved when MAX_ATTEMPTS ≤ 3.  For higher attempt
+// counts the delay grows with each slot until WEBHOOK_MAX_BACKOFF_MS is
+// reached, preventing runaway 15-min sleeps on every attempt forever.
+//
+// The ±10 % jitter spreads retry storms when many deliveries fail together.
+//
+// env: WEBHOOK_MAX_BACKOFF_MS  (default 900_000 — 15 min, same as before)
+//
+const WEBHOOK_MAX_BACKOFF_MS = parseInt(process.env.WEBHOOK_MAX_BACKOFF_MS || '900000', 10);
+
 function getBackoffDelay(attemptNumber) {
   const delays = [60_000, 300_000, 900_000]; // 1 min, 5 min, 15 min
-  return delays[Math.min(attemptNumber, delays.length - 1)];
+  const base = delays[Math.min(attemptNumber, delays.length - 1)];
+  const capped = Math.min(base, WEBHOOK_MAX_BACKOFF_MS);
+  // ±10 % jitter: multiply by a random value in [0.9, 1.1]
+  const jitter = 0.9 + Math.random() * 0.2;
+  return Math.round(capped * jitter);
+}
+
+/**
+ * Returns true when an HTTP status code represents a permanent (non-retriable)
+ * client error. 4xx responses (except 408 Request Timeout, 429 Too Many
+ * Requests, and 425 Too Early) are not recoverable by retrying — the payload
+ * or endpoint configuration must change.
+ *
+ * @param {number|null} statusCode
+ * @returns {boolean}
+ */
+function isPermanentError(statusCode) {
+  if (!statusCode || statusCode < 400 || statusCode >= 500) return false;
+  // Retriable 4xx: request timeout, rate-limit, too-early
+  const RETRIABLE_4XX = new Set([408, 425, 429]);
+  return !RETRIABLE_4XX.has(statusCode);
 }
 
 // ── DNS pinning: re-resolve at send time ──────────────────────────────────────
@@ -218,11 +252,19 @@ function _buildAxiosInstance() {
 async function _writeDeliveryLog({
   endpointId, schoolId, deliveryId, event, payload,
   statusCode, responseBody, success, attemptCount, durationMs, error,
+  responseClass,
 }) {
   try {
     const truncated = responseBody
       ? String(responseBody).slice(0, 1024)
       : null;
+    // Derive responseClass from statusCode/error if not provided explicitly.
+    const resolvedClass = responseClass || (() => {
+      try {
+        const { classifyStatus } = require('../metrics/webhookMetrics');
+        return classifyStatus(statusCode || null, error || null);
+      } catch (_) { return null; }
+    })();
     await WebhookDelivery.create({
       endpointId,
       schoolId,
@@ -230,6 +272,7 @@ async function _writeDeliveryLog({
       event,
       payload,
       statusCode: statusCode || null,
+      responseClass: resolvedClass,
       responseBody: truncated,
       success,
       attemptCount,
@@ -237,6 +280,20 @@ async function _writeDeliveryLog({
       error: error || null,
       lastAttemptAt: new Date(),
     });
+
+    if (endpointId) {
+      const WebhookEndpoint = require('../models/webhookEndpointModel');
+      const attemptedAt = new Date();
+      await WebhookEndpoint.updateOne(
+        { _id: endpointId, schoolId },
+        success
+          ? { $set: { consecutiveFailures: 0, lastDeliveredAt: attemptedAt, lastStatusCode: statusCode || null } }
+          : {
+            $inc: { consecutiveFailures: 1 },
+            $set: { lastFailedAt: attemptedAt, lastStatusCode: statusCode || null },
+          }
+      );
+    }
   } catch (err) {
     logger.error('Failed to write webhook delivery log', {
       deliveryId, endpointId, error: err.message,
@@ -313,9 +370,12 @@ async function _sendToUrl({
     headers['X-StellarEduPay-Signature-V2'] = `sha256=${generateSignatureV2(timestamp, deliveryId, rawBody, secret)}`;
   }
 
-  // Generic tracing header (#978); the vendor-specific correlation + signature
+  // Generic tracing header (#978, #275); the vendor-specific correlation + signature
   // headers are already set above.
-  if (correlationId) headers['X-Correlation-ID'] = correlationId;
+  if (correlationId) {
+    headers['X-Correlation-ID'] = correlationId;
+    headers['X-Request-ID'] = correlationId;
+  }
 
   const http = _buildAxiosInstance();
   const startTime = Date.now();
@@ -335,7 +395,7 @@ async function _sendToUrl({
     // #868: record success metric
     try {
       const { recordDeliverySuccess } = require('../metrics/webhookMetrics');
-      recordDeliverySuccess(event, durationMs);
+      recordDeliverySuccess(event, durationMs, response.status);
     } catch (_) {}
 
     if (endpointId) {
@@ -346,6 +406,7 @@ async function _sendToUrl({
         endpointId, schoolId, deliveryId, event, payload: filteredPayload,
         statusCode: response.status, responseBody: truncatedBody,
         success: true, attemptCount, durationMs, error: null,
+        responseClass: '2xx',
       });
     }
 
@@ -378,11 +439,14 @@ async function _sendToUrl({
       url, event, deliveryId, correlationId, error: errorMessage, durationMs,
     });
 
-    // #868: record failure metric
+    // #868: record failure metric with status class
     try {
-      const { recordDeliveryFailure } = require('../metrics/webhookMetrics');
-      recordDeliveryFailure(event, durationMs, false, schoolId);
-    } catch (_) {}
+      const { recordDeliveryFailure, classifyStatus } = require('../metrics/webhookMetrics');
+      recordDeliveryFailure(event, durationMs, false, schoolId, statusCode, errorMessage);
+      // Compute once here so we can pass it to the delivery log and the return value
+      // without requiring a second import inside _writeDeliveryLog.
+      var resolvedResponseClass = classifyStatus(statusCode, errorMessage); // eslint-disable-line no-var
+    } catch (_) { var resolvedResponseClass = null; } // eslint-disable-line no-var
 
     if (endpointId) {
       const truncatedBody = err.response?.data
@@ -392,10 +456,22 @@ async function _sendToUrl({
         endpointId, schoolId, deliveryId, event, payload: filteredPayload,
         statusCode, responseBody: truncatedBody,
         success: false, attemptCount, durationMs, error: errorMessage,
+        responseClass: resolvedResponseClass,
       });
     }
 
-    return { success: false, statusCode, error: errorMessage, deliveryId };
+    return {
+      success: false,
+      statusCode,
+      error: errorMessage,
+      deliveryId,
+      // Expose the pre-computed class so callers (retryWebhook, queueWebhookRetry)
+      // can persist it on the WebhookRetry document without re-importing classifyStatus.
+      responseClass: resolvedResponseClass,
+      // Callers (retryWebhook, queueWebhookRetry) use this flag to decide
+      // whether to skip the retry queue entirely for permanent client errors.
+      isPermanent: isPermanentError(statusCode),
+    };
   }
 }
 
@@ -469,10 +545,22 @@ async function fireWebhookToEndpoints(schoolId, event, rawPayload, allowedFields
 
     // Queue for retry on failure
     if (!result.success) {
-      try {
-        await queueWebhookRetry(ep.url, event, rawPayload, result.error, ep.secret, deliveryId, ep._id, schoolId);
-      } catch (qErr) {
-        logger.error('Failed to queue webhook retry', { endpointId: ep._id, error: qErr.message });
+      if (result.isPermanent) {
+        // 4xx permanent errors (e.g. 400, 401, 403, 410) must not be retried —
+        // the payload or endpoint configuration must change first.
+        logger.warn('Webhook delivery permanently failed (4xx) — skipping retry queue', {
+          endpointId: ep._id, deliveryId, statusCode: result.statusCode, event,
+        });
+        try {
+          const { recordTerminalOutcome } = require('../metrics/webhookMetrics');
+          recordTerminalOutcome(event, 'permanent_error');
+        } catch (_) {}
+      } else {
+        try {
+          await queueWebhookRetry(ep.url, event, rawPayload, result.error, ep.secret, deliveryId, ep._id, schoolId, result.responseClass || null);
+        } catch (qErr) {
+          logger.error('Failed to queue webhook retry', { endpointId: ep._id, error: qErr.message });
+        }
       }
     }
 
@@ -527,8 +615,18 @@ async function fireWebhook(url, event, payload, secret = null, deliveryId = null
   });
 
   if (!result.success) {
+    if (result.isPermanent) {
+      logger.warn('Webhook delivery permanently failed (4xx) — skipping retry queue', {
+        url, event, statusCode: result.statusCode, deliveryId: id,
+      });
+      try {
+        const { recordTerminalOutcome } = require('../metrics/webhookMetrics');
+        recordTerminalOutcome(event, 'permanent_error');
+      } catch (_) {}
+      return { ...result, queued: false };
+    }
     try {
-      await queueWebhookRetry(url, event, payload, result.error, secret, id, endpointId, schoolId);
+      await queueWebhookRetry(url, event, payload, result.error, secret, id, endpointId, schoolId, result.responseClass || null);
       return { ...result, queued: true };
     } catch (qErr) {
       logger.error('Failed to queue webhook retry', { url, event, error: qErr.message });
@@ -540,7 +638,7 @@ async function fireWebhook(url, event, payload, secret = null, deliveryId = null
 }
 
 // ── Retry queue ───────────────────────────────────────────────────────────────
-async function queueWebhookRetry(url, event, payload, error, secret = null, deliveryId = null, endpointId = null, schoolId = null) {
+async function queueWebhookRetry(url, event, payload, error, secret = null, deliveryId = null, endpointId = null, schoolId = null, responseClass = null) {
   const nextRetryAt = new Date(Date.now() + getBackoffDelay(0));
   const id = deliveryId || uuidv4();
 
@@ -558,7 +656,14 @@ async function queueWebhookRetry(url, event, payload, error, secret = null, deli
     maxAttempts: WEBHOOK_MAX_ATTEMPTS,
     nextRetryAt,
     lastError: error,
-    errorLog: [{ attemptNumber: 0, error, timestamp: new Date() }],
+    responseClass: responseClass || null,
+    errorLog: [{
+      attemptNumber: 0,
+      error,
+      statusCode: null,
+      responseClass: responseClass || null,
+      timestamp: new Date(),
+    }],
   });
 }
 
@@ -661,8 +766,57 @@ async function retryWebhook(retry) {
   if (result.success) {
     await WebhookRetry.updateOne(
       { _id: retry._id },
-      { $set: { status: 'succeeded', succeededAt: new Date(), lastAttemptAt: new Date(), leasedAt: null, leasedBy: null } }
+      { $set: { status: 'succeeded', terminalOutcome: 'succeeded', succeededAt: new Date(), lastAttemptAt: new Date(), leasedAt: null, leasedBy: null } }
     );
+    // Record attempt count and terminal success metrics
+    try {
+      const { recordRetryAttempt, recordTerminalOutcome } = require('../metrics/webhookMetrics');
+      recordRetryAttempt(retry.event, attemptNumber);
+      recordTerminalOutcome(retry.event, 'succeeded');
+    } catch (_) {}
+    return;
+  }
+
+  // Record the attempt regardless of whether we will retry or not
+  try {
+    const { recordRetryAttempt } = require('../metrics/webhookMetrics');
+    recordRetryAttempt(retry.event, attemptNumber);
+  } catch (_) {}
+
+  // 4xx permanent error — do not retry; mark as failed immediately
+  if (result.isPermanent) {
+    logger.warn('Webhook retry permanently failed (4xx) — not re-queuing', {
+      url: retry.url, event: retry.event, deliveryId: retry.deliveryId,
+      correlationId, statusCode: result.statusCode, attempt: attemptNumber,
+    });
+    await WebhookRetry.updateOne(
+      { _id: retry._id },
+      {
+        $set: {
+          status: 'failed',
+          terminalOutcome: 'permanent_error',
+          responseClass: result.responseClass || null,
+          attemptCount: attemptNumber,
+          lastError: result.error,
+          lastAttemptAt: new Date(),
+          leasedAt: null,
+          leasedBy: null,
+        },
+        $push: {
+          errorLog: {
+            attemptNumber,
+            error: result.error,
+            statusCode: result.statusCode || null,
+            responseClass: result.responseClass || null,
+            timestamp: new Date(),
+          },
+        },
+      }
+    );
+    try {
+      const { recordTerminalOutcome } = require('../metrics/webhookMetrics');
+      recordTerminalOutcome(retry.event, 'permanent_error');
+    } catch (_) {}
     return;
   }
 
@@ -671,8 +825,25 @@ async function retryWebhook(retry) {
     await WebhookRetry.updateOne(
       { _id: retry._id },
       {
-        $set: { status: 'pending', attemptCount: attemptNumber, nextRetryAt, lastError: result.error, lastAttemptAt: new Date(), leasedAt: null, leasedBy: null },
-        $push: { errorLog: { attemptNumber, error: result.error, timestamp: new Date() } },
+        $set: {
+          status: 'pending',
+          responseClass: result.responseClass || null,
+          attemptCount: attemptNumber,
+          nextRetryAt,
+          lastError: result.error,
+          lastAttemptAt: new Date(),
+          leasedAt: null,
+          leasedBy: null,
+        },
+        $push: {
+          errorLog: {
+            attemptNumber,
+            error: result.error,
+            statusCode: result.statusCode || null,
+            responseClass: result.responseClass || null,
+            timestamp: new Date(),
+          },
+        },
       }
     );
   } else {
@@ -684,17 +855,33 @@ async function retryWebhook(retry) {
     await WebhookRetry.updateOne(
       { _id: retry._id },
       {
-        $set: { status: 'failed', attemptCount: attemptNumber, lastError: result.error, lastAttemptAt: new Date(), leasedAt: null, leasedBy: null },
-        $push: { errorLog: { attemptNumber, error: result.error, timestamp: new Date() } },
+        $set: {
+          status: 'failed',
+          terminalOutcome: 'dead_lettered',
+          responseClass: result.responseClass || null,
+          attemptCount: attemptNumber,
+          lastError: result.error,
+          lastAttemptAt: new Date(),
+          leasedAt: null,
+          leasedBy: null,
+        },
+        $push: {
+          errorLog: {
+            attemptNumber,
+            error: result.error,
+            statusCode: result.statusCode || null,
+            responseClass: result.responseClass || null,
+            timestamp: new Date(),
+          },
+        },
       }
     );
 
-    // #868: increment dead-letter metric
+    // Record dead-letter metrics
     try {
-      const { recordDeliveryFailure } = require('../metrics/webhookMetrics');
-      recordDeliveryFailure(retry.event, 0, true, retry.schoolId || 'unknown');
-      // Refresh gauge asynchronously
-      const { refreshDeadLetterGauge } = require('../metrics/webhookMetrics');
+      const { recordDeadLetter, recordTerminalOutcome, refreshDeadLetterGauge } = require('../metrics/webhookMetrics');
+      recordDeadLetter(retry.schoolId || 'unknown');
+      recordTerminalOutcome(retry.event, 'dead_lettered');
       refreshDeadLetterGauge().catch(() => {});
     } catch (_) {}
   }
@@ -923,6 +1110,8 @@ module.exports = {
   retryWebhook,
   recoverStuckLeases,
   getBackoffDelay,
+  isPermanentError,
+  WEBHOOK_MAX_BACKOFF_MS,
   // Internal dispatch helper (exported for testing)
   _dispatchToSchool,
   // Testing internals

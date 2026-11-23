@@ -20,6 +20,7 @@ groups:
             poll cycles, putting it outside the documented sync-delay SLA. The
             fleet has likely outgrown its Horizon allowance. See the
             "Operational guidance" section of docs/horizon-rate-limits.md.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/horizon-rate-limits.md"
 
       # ── Warning: we are still hitting the real limit ──────────────────────
       # In steady state the budget should keep the poller below Horizon's
@@ -39,6 +40,7 @@ groups:
             HORIZON_POLL_REPLICA_COUNT does not match the running replica count
             (each replica then spends a full budget). Check both before adding
             tenants.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/horizon-rate-limits.md"
 
       # ── Critical: adaptive ceiling has collapsed ──────────────────────────
       # AIMD halves the ceiling on every 429-affected cycle. Sitting near the
@@ -56,6 +58,7 @@ groups:
             for 30 minutes, meaning sustained rate limiting. Payment sync is
             running at a small fraction of nominal throughput and delays will
             be far outside the documented SLA for every tenant.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/horizon-rate-limits.md"
 
       # ── Warning: budget is chronically saturated ──────────────────────────
       # Deferrals are a normal, ordered response to a bound budget — but a
@@ -74,3 +77,4 @@ groups:
             served purely by the aging guard. Raise the Horizon allowance, move
             to a dedicated Horizon instance, lengthen the poll interval, or
             shard schools across replicas.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/horizon-rate-limits.md"

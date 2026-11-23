@@ -1,0 +1,53 @@
+name: Scheduled dependency and license compliance
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compliance:
+    name: Audit ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [., backend, frontend]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+            frontend/package-lock.json
+      - name: Install package dependencies
+        run: npm ci --prefix "${{ matrix.package }}"
+      - name: Run security audit with exception gate
+        run: node scripts/check-dependency-audit.js "${{ matrix.package }}"
+      - name: Generate outdated and license report
+        id: report
+        continue-on-error: true
+        env:
+          DEPENDENCY_REPORT_OUTPUT: dependency-report-${{ matrix.package == '.' && 'root' || matrix.package }}.json
+        run: |
+          node scripts/dependency-compliance-report.js "${{ matrix.package }}" | tee dependency-report-${{ matrix.package == '.' && 'root' || matrix.package }}.md
+          {
+            echo '### Dependency compliance report (${{ matrix.package }})'
+            cat dependency-report-${{ matrix.package == '.' && 'root' || matrix.package }}.md
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload compliance report
+        uses: actions/upload-artifact@v7
+        with:
+          name: dependency-compliance-${{ matrix.package == '.' && 'root' || matrix.package }}
+          path: |
+            dependency-report-${{ matrix.package == '.' && 'root' || matrix.package }}.json
+            dependency-report-${{ matrix.package == '.' && 'root' || matrix.package }}.md
+      - name: Annotate new compliance findings
+        if: steps.report.outcome == 'failure'
+        run: echo "::error title=New dependency or license finding::Review the uploaded compliance report and update the dependency or exception record."

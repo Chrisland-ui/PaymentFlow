@@ -9,7 +9,7 @@
  * so the collection has been growing without bound there — one document per
  * delivery attempt, per endpoint, per school.
  *
- * Retention comes from WEBHOOK_DELIVERY_RETENTION_DAYS (default 90). The older
+ * Retention comes from WEBHOOK_DELIVERY_RETENTION_DAYS (default 30). The older
  * WEBHOOK_DELIVERY_TTL_SECONDS still takes precedence when set, so a
  * deployment that already configured it keeps the retention it chose.
  */

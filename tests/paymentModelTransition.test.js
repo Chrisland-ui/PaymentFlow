@@ -163,3 +163,15 @@ test('SUCCESS → DISPUTED is also allowed with admin override', async () => {
   const doc = makeDoc({ originalStatus: 'SUCCESS', newStatus: 'DISPUTED', adminOverride: true });
   await expect(callHook(doc)).resolves.toBeUndefined();
 });
+
+// 12. SUBMITTED → SUCCESS is allowed (ledger finality polling advances status)
+test('SUBMITTED → SUCCESS is allowed via save()', async () => {
+  const doc = makeDoc({ originalStatus: 'SUBMITTED', newStatus: 'SUCCESS' });
+  await expect(callHook(doc)).resolves.toBeUndefined();
+});
+
+// 13. SUBMITTED → SUCCESS: also allowed with admin override
+test('SUBMITTED → SUCCESS is also allowed with admin override', async () => {
+  const doc = makeDoc({ originalStatus: 'SUBMITTED', newStatus: 'SUCCESS', adminOverride: true });
+  await expect(callHook(doc)).resolves.toBeUndefined();
+});

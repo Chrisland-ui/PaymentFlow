@@ -97,6 +97,16 @@ describe('requestLogger middleware', () => {
     expect(loggedData.query.page).toBe('1');
   });
 
+  test('redacts nested sensitive fields', () => {
+    const req = makeReq({ body: { profile: { password: 'secret', displayName: 'safe' } } });
+    const res = makeRes();
+    requestLogger()(req, res, () => {});
+
+    const [, loggedData] = logger.info.mock.calls[0];
+    expect(loggedData.body.profile.password).toBe('[REDACTED]');
+    expect(loggedData.body.profile.displayName).toBe('safe');
+  });
+
   test('sensitive fields are not present in raw form in any log call', () => {
     const req = makeReq({
       body: { txHash: 'real-hash', studentId: 'STU999', senderAddress: 'GABC', memo: 'STU999' },

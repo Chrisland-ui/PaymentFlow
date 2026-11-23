@@ -11,6 +11,7 @@ const {
   addTransactionToRetryQueue,
   getQueueStats,
   getDLQStats,
+  getDeadLetterQueue,
   shutdownQueue,
   config,
   QUEUE_NAMES,
@@ -428,12 +429,202 @@ async function drainWorker() {
   return { drained: true, activeJobs: 0, requeuedJobs: 0 };
 }
 
+/**
+ * List jobs in the dead-letter queue with sensitive payload redacted.
+ */
+async function listDeadLetterJobs(opts = {}) {
+  try {
+    await initializeRetryQueue();
+    const dlq = getDeadLetterQueue();
+    if (!dlq) {
+      return { jobs: [], total: 0, limit: opts.limit || 50, offset: opts.offset || 0 };
+    }
+
+    const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(opts.offset, 10) || 0, 0);
+
+    const waitingJobs = await dlq.getWaiting(offset, offset + limit - 1);
+    const total = await dlq.getWaitingCount();
+
+    const jobs = waitingJobs.map((job) => ({
+      jobId: job.id,
+      originalJobId: job.data.originalJobId,
+      transactionHash: job.data.transactionHash,
+      studentId: job.data.studentId,
+      correlationId: job.data.correlationId,
+      failureReason: job.data.failureReason,
+      failureCode: job.data.failureCode,
+      failedAttempts: job.data.failedAttempts,
+      attemptHistory: job.data.attemptHistory || [],
+      safePayload: job.data.safePayload || {},
+      failedAt: job.data.failedAt,
+      createdAt: new Date(job.timestamp).toISOString(),
+    }));
+
+    return {
+      jobs,
+      total,
+      limit,
+      offset,
+    };
+  } catch (error) {
+    logger.error('Failed to list dead-letter jobs', { error: error.message });
+    throw error;
+  }
+}
+
+/**
+ * Inspect details of a specific dead-letter job from DLQ.
+ */
+async function getDeadLetterJobDetails(jobId) {
+  try {
+    await initializeRetryQueue();
+    const dlq = getDeadLetterQueue();
+    if (!dlq) {
+      const err = new Error('Dead-letter queue unavailable');
+      err.code = 'QUEUE_UNAVAILABLE';
+      throw err;
+    }
+
+    const job = await dlq.getJob(jobId);
+    if (!job) {
+      const err = new Error(`Dead-letter job ${jobId} not found`);
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+
+    return {
+      jobId: job.id,
+      originalJobId: job.data.originalJobId,
+      transactionHash: job.data.transactionHash,
+      studentId: job.data.studentId,
+      correlationId: job.data.correlationId,
+      failureReason: job.data.failureReason,
+      failureCode: job.data.failureCode,
+      failedAttempts: job.data.failedAttempts,
+      attemptHistory: job.data.attemptHistory || [],
+      safePayload: job.data.safePayload || {},
+      failedAt: job.data.failedAt,
+      createdAt: new Date(job.timestamp).toISOString(),
+    };
+  } catch (error) {
+    logger.error('Failed to get dead-letter job details', { jobId, error: error.message });
+    throw error;
+  }
+}
+
+/**
+ * Controlled, idempotent replay of a dead-lettered job.
+ */
+async function replayDeadLetterJob(jobId, operatorContext = {}) {
+  try {
+    await initializeRetryQueue();
+    const dlq = getDeadLetterQueue();
+    if (!dlq) {
+      const err = new Error('Dead-letter queue unavailable');
+      err.code = 'QUEUE_UNAVAILABLE';
+      throw err;
+    }
+
+    const job = await dlq.getJob(jobId);
+    if (!job) {
+      const err = new Error(`Dead-letter job ${jobId} not found`);
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+
+    const txHash = job.data.transactionHash;
+    const studentId = job.data.studentId;
+    const correlationId = job.data.correlationId;
+    const safePayload = job.data.safePayload || {};
+
+    // Idempotency: verify if already successfully processed
+    const Payment = require('../models/paymentModel');
+    const existingPayment = await Payment.findOne({ txHash });
+    if (existingPayment && (existingPayment.status === 'SUCCESS' || existingPayment.status === 'confirmed')) {
+      logger.info('[BullMQRetryService] Replay skipped: transaction already processed and confirmed', {
+        jobId,
+        txHash,
+      });
+
+      await job.remove().catch((e) => logger.debug('Failed to remove replayed job from DLQ', { error: e.message }));
+      await PendingVerification.findOneAndUpdate(
+        { txHash },
+        { $set: { status: 'resolved', resolvedAt: new Date() } },
+        { _bypassTenantScope: true }
+      );
+
+      return {
+        success: true,
+        replayed: false,
+        idempotent: true,
+        jobId,
+        transactionHash: txHash,
+        message: 'Transaction already successfully processed and confirmed on-chain',
+      };
+    }
+
+    // Re-enqueue into retry queue with fresh attempts and enriched context
+    const newJob = await addTransactionToRetryQueue(txHash, studentId, {
+      ...safePayload,
+      correlationId,
+      replayedFromDLQ: true,
+      replayedJobId: jobId,
+      replayedBy: operatorContext.performedBy || 'admin',
+      replayedAt: new Date().toISOString(),
+      priority: 1,
+    });
+
+    // Remove old job from DLQ
+    await job.remove().catch((e) => logger.debug('Failed to remove replayed job from DLQ', { error: e.message }));
+
+    // Update PendingVerification in MongoDB
+    await PendingVerification.findOneAndUpdate(
+      { txHash },
+      {
+        $set: {
+          status: 'pending',
+          attempts: 0,
+          nextRetryAt: new Date(),
+          lastReplayedAt: new Date(),
+          lastError: null,
+        },
+        $inc: { replayCount: 1 },
+      },
+      { _bypassTenantScope: true }
+    );
+
+    logger.info('[BullMQRetryService] Safely re-enqueued dead-letter job for replay', {
+      jobId,
+      newJobId: newJob?.id,
+      txHash,
+      performedBy: operatorContext.performedBy,
+    });
+
+    return {
+      success: true,
+      replayed: true,
+      idempotent: false,
+      jobId,
+      newJobId: newJob?.id,
+      transactionHash: txHash,
+      message: 'Job successfully re-enqueued for retry',
+    };
+  } catch (error) {
+    logger.error('Failed to replay dead-letter job', { jobId, error: error.message });
+    throw error;
+  }
+}
+
 module.exports = {
   initializeRetryQueue,
   queueFailedTransaction,
   getRetryQueueStats,
   getJobDetails,
   getJobsByState,
+  listDeadLetterJobs,
+  getDeadLetterJobDetails,
+  replayDeadLetterJob,
   retryJobImmediately,
   removeJob,
   cleanupOldJobs,

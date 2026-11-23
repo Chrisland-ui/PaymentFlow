@@ -1,0 +1,28 @@
+{
+  "id": "scenario-02-on-chain-confirmed-backend-pending",
+  "description": "On-chain confirmed but backend still pending — reconciliation should mark it confirmed.",
+  "contractState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000002",
+    "status": "confirmed",
+    "amount": "150.0000000",
+    "asset": "XLM",
+    "from": "GPARENT2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "to":   "GSCHOOL1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "memo": "STU002",
+    "ledger": 1020,
+    "createdAt": "2026-10-02T08:00:00.000Z"
+  },
+  "backendState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000002",
+    "status": "pending",
+    "amount": 150,
+    "studentId": "STU002",
+    "confirmedAt": null
+  },
+  "expectedOutcome": {
+    "action": "confirm",
+    "finalBackendStatus": "confirmed",
+    "divergence": true,
+    "divergenceType": "status_mismatch"
+  }
+}

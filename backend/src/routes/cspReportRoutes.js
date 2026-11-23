@@ -12,9 +12,9 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: 'Invalid CSP report' });
   }
 
-  const { 'csp-report': cspReport } = report;
+  const cspReport = report['csp-report'] || report.body;
 
-  if (!cspReport) {
+  if (!cspReport || typeof cspReport !== 'object') {
     return res.status(400).json({ error: 'Missing csp-report field' });
   }
 

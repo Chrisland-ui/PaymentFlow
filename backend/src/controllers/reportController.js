@@ -8,16 +8,13 @@ const {
   ACCOUNTING_SCHEMA_VERSION,
   getDataVersion,
 } = require('../services/reportService');
-const { get, set, KEYS, TTL } = require('../cache');
+const { get, set, getSafe, KEYS, TTL } = require('../cache');
 const {
   enqueueReportJob,
-  getJobStatus,
-  setJobProcessing,
-  setJobCompleted,
-  setJobFailed,
 } = require('../queue/reportQueue');
 const { ReportJob, REPORT_STATUSES } = require('../models/reportJobModel');
 const School = require('../models/schoolModel');
+const { createReportDownloadUrl, SIGNED_URL_TTL_SECONDS } = require('../services/reportArtifactStorage');
 
 const LARGE_REPORT_THRESHOLD_DAYS = parseInt(process.env.LARGE_REPORT_THRESHOLD_DAYS || '30', 10);
 
@@ -34,29 +31,66 @@ async function getReport(req, res, next) {
     // req.query values are always strings; coerce explicitly so ?async=false is
     // treated as false rather than the truthy string "false".
     const isAsync = req.query.async === 'true';
-    const isLargeReport = getDaysBetween(startDate, endDate) >= LARGE_REPORT_THRESHOLD_DAYS;
+    const isLargeReport = !startDate || !endDate || getDaysBetween(startDate, endDate) >= LARGE_REPORT_THRESHOLD_DAYS;
 
-    if (isAsync && isLargeReport) {
-      const job = await enqueueReportJob({
-        schoolId: req.schoolId,
-        type: format === 'accounting_csv' ? 'accounting_csv' : 'report',
-        startDate,
-        endDate,
-        timezone: (await School.findOne({ schoolId: req.schoolId }).lean())?.timezone || 'UTC',
-        schemaVersion: schema_version || (format === 'accounting_csv' ? ACCOUNTING_SCHEMA_VERSION : null),
+    // Audit report exports — exports can contain PII so they are a privileged read
+    if (req.auditContext) {
+      const { logAudit } = require('../services/auditService');
+      await logAudit({
+        schoolId:    req.schoolId,
+        action:      'report_export',
+        performedBy: req.auditContext.performedBy,
+        targetId:    req.schoolId,
+        targetType:  'report',
+        details: {
+          format,
+          startDate: startDate || null,
+          endDate:   endDate   || null,
+          async:     isAsync,
+        },
+        result:    'success',
+        ipAddress: req.auditContext.ipAddress,
+        userAgent: req.auditContext.userAgent,
       });
+    }
 
-      return res.status(202).json({
-        jobId: job.jobId,
-        status: REPORT_STATUSES.PENDING,
-        message: 'Report generation started. Poll /api/reports/jobs/{jobId} for status.',
-        statusUrl: job.reportJob.statusUrl,
-      });
+    if (isAsync || isLargeReport) {
+      try {
+        const job = await enqueueReportJob({
+          schoolId: req.schoolId,
+          type: format === 'accounting_csv' ? 'accounting_csv' : 'report',
+          format,
+          startDate,
+          endDate,
+          timezone: (await School.findOne({ schoolId: req.schoolId }).lean())?.timezone || 'UTC',
+          schemaVersion: schema_version || (format === 'accounting_csv' ? ACCOUNTING_SCHEMA_VERSION : null),
+        });
+
+        return res.status(202).json({
+          reportJobId: job.jobId,
+          jobId: job.jobId,
+          status: REPORT_STATUSES.PENDING,
+          message: 'Report generation started.',
+          statusUrl: `/api/reports/${job.jobId}/status`,
+        });
+      } catch (err) {
+        if (err.code === 'QUEUE_UNAVAILABLE' || err.message?.includes('Redis') || err.message?.includes('queue')) {
+          return res.status(503).json({
+            error: 'Async report queue is temporarily unavailable. Please retry synchronously or try again later.',
+            code: 'QUEUE_UNAVAILABLE',
+            actionable: true,
+            retryAfterSeconds: 30,
+            details: 'Queue dependency outage detected; async report mutation cannot be queued at this time.',
+          });
+        }
+        throw err;
+      }
     }
 
     if (format === 'accounting_csv') {
       const dataVersion = await getDataVersion(req.schoolId);
-      const cacheKey = KEYS.report(req.schoolId, startDate, endDate, dataVersion);
+      const timezone = (await School.findOne({ schoolId: req.schoolId }).lean())?.timezone || 'UTC';
+      const cacheKey = KEYS.report(req.schoolId, startDate, endDate, dataVersion, timezone);
       let cached = get(cacheKey);
       if (cached !== undefined) {
         const csv = cached.csv;
@@ -74,7 +108,7 @@ async function getReport(req, res, next) {
         return res.send(csv);
       }
 
-      const { csv, schemaVersion } = await generateAccountingCsv({ schoolId: req.schoolId, startDate, endDate });
+      const { csv, schemaVersion } = await generateAccountingCsv({ schoolId: req.schoolId, startDate, endDate, timezone });
       set(cacheKey, { csv, schemaVersion }, TTL.REPORT);
 
       const s = startDate || null;
@@ -93,7 +127,7 @@ async function getReport(req, res, next) {
     const school = await School.findOne({ schoolId: req.schoolId }).lean();
     const timezone = school?.timezone || 'UTC';
     const dataVersion = await getDataVersion(req.schoolId);
-    const cacheKey = KEYS.report(req.schoolId, startDate, endDate, dataVersion);
+    const cacheKey = KEYS.report(req.schoolId, startDate, endDate, dataVersion, timezone);
     let report = get(cacheKey);
     if (report === undefined) {
       report = await generateReport({ schoolId: req.schoolId, startDate, endDate, timezone });
@@ -121,11 +155,11 @@ async function getDashboard(req, res, next) {
   try {
     const school = await School.findOne({ schoolId: req.schoolId }).lean();
     const cacheKey = `dashboard:${req.schoolId}`;
-    let metrics = get(cacheKey);
-    if (metrics === undefined) {
-      metrics = await getDashboardMetrics({ schoolId: req.schoolId, timezone: school?.timezone || 'UTC' });
-      set(cacheKey, metrics, TTL.REPORT);
-    }
+    const metrics = await getSafe(
+      cacheKey,
+      () => getDashboardMetrics({ schoolId: req.schoolId, timezone: school?.timezone || 'UTC' }),
+      { ttl: TTL.REPORT, cacheName: 'dashboard' }
+    );
     res.json(metrics);
   } catch (err) { next(err); }
 }
@@ -148,7 +182,10 @@ async function getReportJob(req, res, next) {
       createdAt: job.createdAt,
       startedAt: job.startedAt,
       completedAt: job.completedAt,
-      downloadUrl: job.status === REPORT_STATUSES.COMPLETED ? `/api/reports/jobs/${jobId}/download` : null,
+      downloadUrl: job.status === REPORT_STATUSES.READY && job.downloadExpiresAt > new Date()
+        ? `/api/reports/${jobId}/download`
+        : null,
+      downloadExpiresAt: job.downloadExpiresAt,
     });
   } catch (err) { next(err); }
 }
@@ -156,14 +193,17 @@ async function getReportJob(req, res, next) {
 async function downloadReportJob(req, res, next) {
   try {
     const { jobId } = req.params;
-    const { format = 'json' } = req.query;
     const job = await ReportJob.findOne({ jobId, schoolId: req.schoolId }).lean();
 
     if (!job) {
       return res.status(404).json({ error: 'Report job not found' });
     }
 
-    if (job.status !== REPORT_STATUSES.COMPLETED) {
+    if (job.status === REPORT_STATUSES.EXPIRED || (job.downloadExpiresAt && job.downloadExpiresAt <= new Date())) {
+      return res.status(410).json({ error: 'Report download URL has expired', code: 'REPORT_EXPIRED' });
+    }
+
+    if (job.status !== REPORT_STATUSES.READY) {
       return res.status(409).json({
         error: 'Report not ready',
         status: job.status,
@@ -171,35 +211,22 @@ async function downloadReportJob(req, res, next) {
       });
     }
 
-    if (job.type === 'accounting_csv') {
-      res.setHeader('Content-Type', 'text/csv');
-      const s = job.params.startDate || null;
-      const e = job.params.endDate || null;
-      let filename;
-      if (s && e) filename = `accounting-v${job.result.schemaVersion}-${s}-to-${e}.csv`;
-      else if (s) filename = `accounting-v${job.result.schemaVersion}-${s}-onwards.csv`;
-      else if (e) filename = `accounting-v${job.result.schemaVersion}-to-${e}.csv`;
-      else filename = `accounting-v${job.result.schemaVersion}-all-time.csv`;
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('X-Export-Schema-Version', String(job.result.schemaVersion));
-      return res.send(job.result.csv);
+    if (!job.artifactKey) {
+      return res.status(410).json({ error: 'Report artifact is no longer available', code: 'REPORT_EXPIRED' });
     }
-
-    // Regular report
-    if (format === 'csv') {
-      res.setHeader('Content-Type', 'text/csv');
-      const s = job.params.startDate || null;
-      const e = job.params.endDate || null;
-      let filename;
-      if (s && e) filename = `report-${s}-to-${e}.csv`;
-      else if (s) filename = `report-${s}-to-all-time.csv`;
-      else if (e) filename = `report-all-time-to-${e}.csv`;
-      else filename = 'report-all-time.csv';
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      return res.send(reportToCsv(job.result.report));
+    const remainingSeconds = Math.floor((new Date(job.downloadExpiresAt).getTime() - Date.now()) / 1000);
+    if (remainingSeconds <= 0) {
+      return res.status(410).json({ error: 'Report download URL has expired', code: 'REPORT_EXPIRED' });
     }
-
-    res.json(job.result.report);
+    const downloadUrl = await createReportDownloadUrl(
+      job.artifactKey,
+      Math.min(SIGNED_URL_TTL_SECONDS, remainingSeconds),
+    );
+    return res.json({
+      reportJobId: job.jobId,
+      downloadUrl,
+      expiresAt: job.downloadExpiresAt,
+    });
   } catch (err) { next(err); }
 }
 

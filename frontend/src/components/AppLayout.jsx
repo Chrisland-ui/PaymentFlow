@@ -14,6 +14,7 @@ import {
   IconDollarSign,
   IconShield,
   IconTrendingUp,
+  IconAlertTriangle,
 } from "./Icons";
 
 const PUBLIC_NAV = [
@@ -28,6 +29,7 @@ const ADMIN_NAV = [
   { href: "/fee-adjustments",         label: "Fee Rules",     Icon: IconLayers },
   { href: "/source-validation-rules", label: "Source Rules",  Icon: IconShield },
   { href: "/audit-logs",              label: "Audit Logs",    Icon: IconFileText },
+  { href: "/retention",               i18nKey: "nav.retention", Icon: IconShield },
   { href: "/disputes",                label: "Disputes",      Icon: IconMessageCircle },
 ];
 

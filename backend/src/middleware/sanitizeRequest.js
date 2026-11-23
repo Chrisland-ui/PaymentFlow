@@ -14,25 +14,32 @@ const MAX_ARRAY_LENGTH = parseInt(process.env.JSON_MAX_ARRAY_LENGTH  || '100', 1
 
 // ── Depth / array-length checker ──────────────────────────────────────────────
 
-function checkDepth(value, currentDepth) {
-  if (currentDepth > MAX_DEPTH) return false;
+function collectComplexityErrors(value, currentDepth, path, errors) {
+  if (currentDepth > MAX_DEPTH) {
+    errors.push({ field: path || 'body', message: `must not exceed ${MAX_DEPTH} levels of nesting` });
+    return;
+  }
   if (Array.isArray(value)) {
-    if (value.length > MAX_ARRAY_LENGTH) return false;
-    return value.every((v) => checkDepth(v, currentDepth + 1));
+    if (value.length > MAX_ARRAY_LENGTH) {
+      errors.push({ field: path || 'body', message: `must not contain more than ${MAX_ARRAY_LENGTH} items` });
+      return;
+    }
+    value.forEach((item, index) => collectComplexityErrors(item, currentDepth + 1, `${path}[${index}]`, errors));
+    return;
   }
   if (value !== null && typeof value === 'object') {
-    return Object.values(value).every((v) => checkDepth(v, currentDepth + 1));
+    for (const [key, child] of Object.entries(value)) {
+      collectComplexityErrors(child, currentDepth + 1, path ? `${path}.${key}` : key, errors);
+    }
   }
-  return true;
 }
 
 function jsonDepthGuard(req, res, next) {
   if (req.body && typeof req.body === 'object') {
-    if (!checkDepth(req.body, 1)) {
-      return res.status(400).json({
-        error: 'Request body exceeds maximum allowed depth or array length.',
-        code: 'PAYLOAD_TOO_COMPLEX',
-      });
+    const errors = [];
+    collectComplexityErrors(req.body, 1, '', errors);
+    if (errors.length) {
+      return res.status(400).json({ errors, code: 'VALIDATION_ERROR' });
     }
   }
   return next();

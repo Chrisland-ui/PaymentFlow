@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { createPaymentPlan, getPaymentPlan, cancelPaymentPlan } from "../services/api";
+import { useAbortController } from "../hooks/useAbortController";
 import { IconAlertTriangle, IconCheck, IconX } from "./Icons";
+import TimestampDisplay from "./TimestampDisplay";
 
 export default function PaymentPlanForm({ student, onClose, onSave }) {
   const { t } = useTranslation();
@@ -17,14 +19,19 @@ export default function PaymentPlanForm({ student, onClose, onSave }) {
   const [installments, setInstallments] = useState([]);
   const [creating, setCreating] = useState(false);
 
+  // Issue #254 — abort in-flight plan fetch when the component unmounts.
+  const { signal } = useAbortController();
+
   const loadPaymentPlan = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const { data } = await getPaymentPlan(student.studentId);
+      const { data } = await getPaymentPlan(student.studentId, { signal });
       setPlan(data);
       setMode("view");
     } catch (err) {
+      // Silently ignore requests cancelled on unmount or navigation.
+      if (err?.name === "CanceledError" || err?.code === "ERR_CANCELED") return;
       if (err.response?.status === 404) {
         setPlan(null);
         setMode("create");
@@ -34,7 +41,7 @@ export default function PaymentPlanForm({ student, onClose, onSave }) {
     } finally {
       setLoading(false);
     }
-  }, [student?.studentId, t]);
+  }, [student?.studentId, t, signal]);
 
   useEffect(() => {
     loadPaymentPlan();
@@ -269,7 +276,9 @@ export default function PaymentPlanForm({ student, onClose, onSave }) {
                     <div>
                       <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{t("paymentPlan.dueDate")}</div>
                       <div style={{ fontWeight: 600 }}>
-                        {inst.dueDate ? new Date(inst.dueDate).toLocaleDateString() : "—"}
+                        {inst.dueDate
+                          ? <TimestampDisplay iso={inst.dueDate} dateOnly />
+                          : "—"}
                       </div>
                     </div>
                     <div>

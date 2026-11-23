@@ -1,0 +1,144 @@
+name: Mutation test — authorization middleware
+
+# Issue #96: Run mutation testing on the authorization middleware to verify
+# that existing tests kill mutants affecting access control conditions.
+#
+# When to run:
+#   - On any PR that touches auth middleware or auth-related tests
+#   - Weekly on a schedule to catch regressions
+#   - On demand via workflow_dispatch
+#
+# Results:
+#   - HTML report uploaded as a downloadable artefact on every run
+#   - JSON report included for programmatic trend analysis
+#   - Job fails (exit non-zero) if the mutation score drops below the
+#     configured 'break' threshold (65%), alerting on regressions
+#
+# Runtime is bounded by targeting only backend/src/middleware/auth.js.
+# Typical run: ~150–200 mutants, ~2–4 minutes on standard CI hardware.
+on:
+  schedule:
+    - cron: '0 4 * * 2' # every Tuesday at 04:00 UTC
+  pull_request:
+    paths:
+      - 'backend/src/middleware/auth.js'
+      - 'tests/authentication-enforcement.test.js'
+      - 'tests/jwtRefreshTokens.test.js'
+      - 'tests/cross-tenant-access.test.js'
+      - 'tests/httpOnlyCookieAuth.test.js'
+      - 'tests/security-response-leakage.test.js'
+      - 'stryker.auth.config.mjs'
+  workflow_dispatch: {}
+
+jobs:
+  mutation-test-auth:
+    name: Mutation test (auth middleware)
+    runs-on: ubuntu-latest
+    env:
+      STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
+      MONGO_URI: mongodb://localhost:27017/stellaredupay_test?replicaSet=rs0
+      JWT_SECRET: ci-mutation-test-jwt-secret-not-used-in-production
+      SCHOOL_WALLET_ADDRESS: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --replSet rs0
+          --health-cmd "mongosh --quiet --eval 'try { if (rs.status().ok !== 1) { throw new Error(\"not ready\"); } } catch (e) { try { rs.initiate({ _id: \"rs0\", members: [{ _id: 0, host: \"localhost:27017\" }] }); } catch (e2) {} process.exit(1); } if (!db.hello().isWritablePrimary) { process.exit(1); }'"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 12
+          --health-start-period 20s
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
+
+      # Cache node_modules to avoid re-downloading on every run.
+      # Stryker's own incremental cache (.stryker-tmp/) is NOT cached here
+      # because the cache key would need to include all source + test content.
+      # The job runs fast enough that incremental caching is optional.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            backend/node_modules
+            frontend/node_modules
+            node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          cd backend && npm ci && cd ..
+          cd frontend && npm ci && cd ..
+
+      # Create the report output directory so Stryker can write to it.
+      - name: Create report directory
+        run: mkdir -p reports/mutation
+
+      # Run Stryker. The config file sets:
+      #   - mutate: ['backend/src/middleware/auth.js']
+      #   - thresholds.break: 65  (job fails if score < 65%)
+      #   - reporters: ['html', 'json', 'progress']
+      #   - reportDir: 'reports/mutation'
+      #
+      # Stryker exits non-zero if:
+      #   - The mutation score is below thresholds.break
+      #   - Any test file fails to compile or crashes
+      - name: Run Stryker mutation tests
+        run: npx --yes @stryker-mutator/core stryker run stryker.auth.config.mjs
+        # Allow up to 10 minutes for the mutation run
+        timeout-minutes: 10
+
+      # Always upload the HTML + JSON reports so they are available for
+      # review even when the job fails (surviving mutants need investigation).
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report-auth-${{ github.run_id }}
+          path: reports/mutation/
+          retention-days: 30
+
+      # Post a summary of the mutation score to the GitHub step summary
+      # so it is visible directly in the PR checks UI without opening the artefact.
+      - name: Post mutation score to GitHub Step Summary
+        if: always()
+        run: |
+          REPORT_FILE="reports/mutation/mutation.json"
+          if [[ -f "${REPORT_FILE}" ]]; then
+            # Extract score from Stryker JSON report using Node.js
+            node -e "
+              const fs = require('fs');
+              const report = JSON.parse(fs.readFileSync('${REPORT_FILE}', 'utf8'));
+              const metrics = report.metrics || report.schemaVersion ? report : null;
+              if (!metrics) { console.log('No metrics found in report'); process.exit(0); }
+              const score = metrics.mutationScore !== undefined
+                ? metrics.mutationScore
+                : (metrics.metrics ? metrics.metrics.mutationScore : 'N/A');
+              const killed = metrics.killed !== undefined ? metrics.killed : 'N/A';
+              const total  = metrics.total  !== undefined ? metrics.total  : 'N/A';
+              const survived = metrics.survived !== undefined ? metrics.survived : 'N/A';
+              console.log('## Mutation Test Results — Authorization Middleware');
+              console.log('');
+              console.log('| Metric | Value |');
+              console.log('|--------|-------|');
+              console.log('| Mutation Score | ' + (typeof score === 'number' ? score.toFixed(2) + '%' : score) + ' |');
+              console.log('| Killed  | ' + killed + ' |');
+              console.log('| Survived | ' + survived + ' |');
+              console.log('| Total | ' + total + ' |');
+              console.log('');
+              console.log('> Threshold: break at 65%, low at 70%, high at 80%');
+            " >> "${GITHUB_STEP_SUMMARY}" 2>/dev/null || \
+              echo "Mutation score extraction failed — check the uploaded HTML report" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "No mutation report found at ${REPORT_FILE}" >> "${GITHUB_STEP_SUMMARY}"
+          fi

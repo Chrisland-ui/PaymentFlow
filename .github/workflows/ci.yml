@@ -35,7 +35,7 @@ jobs:
             backend/node_modules
             frontend/node_modules
             node_modules
-          key: \( {{ runner.os }}-node- \){{ hashFiles('**/package-lock.json') }}
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-node-
       - run: npm ci
@@ -115,7 +115,7 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: backend/node_modules
-          key: \( {{ runner.os }}-backend-node- \){{ hashFiles('backend/package-lock.json') }}
+          key: ${{ runner.os }}-backend-node-${{ hashFiles('backend/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-backend-node-
       - name: Install backend dependencies
@@ -134,7 +134,7 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: frontend/node_modules
-          key: \( {{ runner.os }}-frontend-node- \){{ hashFiles('frontend/package-lock.json') }}
+          key: ${{ runner.os }}-frontend-node-${{ hashFiles('frontend/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-frontend-node-
       - name: Install frontend dependencies
@@ -155,13 +155,22 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: frontend/node_modules
-          key: \( {{ runner.os }}-frontend-node- \){{ hashFiles('frontend/package-lock.json') }}
+          key: ${{ runner.os }}-frontend-node-${{ hashFiles('frontend/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-frontend-node-
       - name: Install frontend dependencies
         run: cd frontend && npm ci
       - name: Build frontend (next build)
         run: cd frontend && npm run build
+      - name: Check bundle budgets
+        run: node scripts/bundle-budget.js
+      - name: Upload bundle manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-manifest
+          path: frontend/.next/build-manifest.json
+          retention-days: 14
 
   test:
     runs-on: ubuntu-latest
@@ -203,7 +212,7 @@ jobs:
             backend/node_modules
             frontend/node_modules
             node_modules
-          key: \( {{ runner.os }}-node- \){{ hashFiles('**/package-lock.json') }}
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-node-
       - run: npm ci
@@ -278,6 +287,14 @@ jobs:
 
       - name: Frontend coverage
         run: npm run coverage:frontend
+
+      - name: Print risk-area coverage summary
+        if: always()
+        run: |
+          echo "=== Risk-area coverage summary (Issue #100) ==="
+          npm run coverage -- --coverageReporters=text --silent 2>/dev/null | \
+            grep -E "(All files|services|middleware|controllers|stellarService|authController|webhookService|reconciliation|paymentController|paymentConfirmation)" || true
+          echo "================================================"
 
       - name: Upload backend coverage
         if: always()
@@ -411,6 +428,184 @@ jobs:
         if: always() && steps.changes.outputs.run == 'true'
         run: docker compose down -v
 
+  # ── #335: Migration compatibility and rollback tests ────────────────────────
+  # Applies all migrations in order on a seeded test database, runs smoke tests
+  # after each step, tests every down() function, and verifies that schema state
+  # after up()+down() matches the pre-migration state.
+  migration-compat:
+    name: Migration compatibility & rollback tests
+    runs-on: ubuntu-latest
+    env:
+      STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
+      MONGO_URI: mongodb://localhost:27017/stellaredupay_migration_test?replicaSet=rs0
+      JWT_SECRET: ci-test-jwt-secret-not-used-in-production
+      SCHOOL_WALLET_ADDRESS: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --replSet rs0
+          --health-cmd "mongosh --quiet --eval 'try { if (rs.status().ok !== 1) { throw new Error(\"rs not initiated\"); } } catch (e) { try { rs.initiate({ _id: \"rs0\", members: [{ _id: 0, host: \"localhost:27017\" }] }); } catch (e2) {} process.exit(1); } if (!db.hello().isWritablePrimary) { process.exit(1); }'"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 12
+          --health-start-period 20s
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
+      - uses: actions/cache@v6
+        with:
+          path: |
+            backend/node_modules
+            node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+      - run: npm ci
+      - run: cd backend && npm ci
+      - name: Run migration compatibility & rollback tests
+        run: npx jest --testPathPattern=tests/issue-335-migration-compatibility-rollback --forceExit --runInBand
+        timeout-minutes: 10
+
+  # ── #338: Cross-browser smoke test matrix ───────────────────────────────────
+  # Runs the Playwright smoke test suite against Chromium, Firefox, and WebKit
+  # on every PR to main.  Browser-specific failures are reported per-browser
+  # so the exact browser causing the failure is visible in the CI summary.
+  cross-browser:
+    name: Cross-browser smoke test matrix
+    runs-on: ubuntu-latest
+    # Only run on PRs targeting main (not on feature branch pushes).
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.base_ref == 'main'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
+      - uses: actions/cache@v6
+        with:
+          path: |
+            frontend/node_modules
+            node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+      - run: npm ci
+      - run: cd frontend && npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox webkit
+      - name: Validate cross-browser config and smoke suite structure
+        run: npx jest --testPathPattern=tests/issue-338-cross-browser-smoke-matrix --forceExit
+      - name: Run cross-browser smoke tests (Playwright)
+        env:
+          APP_URL: ${{ vars.STAGING_URL || 'http://localhost:3000' }}
+        run: |
+          # Start the frontend in the background if no external APP_URL is set
+          if [ -z "${{ vars.STAGING_URL }}" ]; then
+            cd frontend && NEXT_PUBLIC_API_URL=http://localhost:5000/api npm run build && npm start &
+            sleep 10
+            cd ..
+          fi
+          npx playwright test --config=playwright.cross-browser.config.js
+        timeout-minutes: 15
+        continue-on-error: false
+      - name: Upload Playwright report (cross-browser)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-cross-browser-report
+          path: reports/cross-browser
+          retention-days: 14
+
+  # ── #91: API schema regression ───────────────────────────────────────────
+  api-schema-regression:
+    name: API schema regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
+      - uses: actions/cache@v6
+        with:
+          path: |
+            node_modules
+            backend/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+      - run: npm ci
+      - run: cd backend && npm ci && cd ..
+      - name: Run API schema regression tests
+        run: npx jest tests/api-schema/ --forceExit
+
+  # ── #90: Cross-browser smoke matrix ─────────────────────────────────────
+  cross-browser-smoke:
+    name: Cross-browser smoke matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
+      - uses: actions/cache@v6
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+      - run: npm ci
+      - name: Run cross-browser smoke matrix
+        run: npx jest tests/smoke/ --forceExit
+      - name: Upload smoke test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-screenshots
+          path: test-results/smoke/
+          retention-days: 7
+
+  # ── #60: Local contract simulation ──────────────────────────────────────
+  # Runs representative Soroban contract transaction simulations using the
+  # existing Node.js contract services. Catches contract assumption drift
+  # before it reaches staging.  Tool version is pinned via the
+  # CONTRACT_SIMULATION_TOOLCHAIN env var. The script logs the contract
+  # schema version and network configuration so the output is always
+  # reproducible from the CI log.
+  contract-simulation:
+    name: Local contract simulation
+    runs-on: ubuntu-latest
+    env:
+      STELLAR_NETWORK: testnet
+      CONTRACT_SIMULATION_TOOLCHAIN: "1.0.0"
+      # Dummy values required by config/index.js validation at module load time.
+      # No database or real keys are used during simulation.
+      JWT_SECRET: ci-contract-simulation-dummy-secret
+      MONGO_URI: mongodb://localhost:27017/simulation_dummy
+      SCHOOL_WALLET_ADDRESS: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
+      - uses: actions/cache@v6
+        with:
+          path: |
+            backend/node_modules
+            node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+      - run: npm ci
+      - run: cd backend && npm ci && cd ..
+      - name: Run contract simulations
+        run: node scripts/contract-simulation.js
+
   # ── #1389: Required gate ─────────────────────────────────────────────────
   # A single job that every branch-protection rule needs to require. Add this
   # job name ("CI gate") as the sole required status check in GitHub's branch
@@ -435,5 +630,10 @@ jobs:
       - build-frontend
       - test
       - coverage
+      - migration-compat
+      - cross-browser
+      - api-schema-regression
+      - cross-browser-smoke
+      - contract-simulation
     steps:
       - run: echo "All required checks passed."

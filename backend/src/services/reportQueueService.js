@@ -5,8 +5,8 @@ const {
   setJobProcessing,
   setJobCompleted,
   setJobFailed,
+  createQueue,
   closeQueue,
-  QUEUE_NAME,
 } = require('../queue/reportQueue');
 const {
   generateReport,
@@ -14,22 +14,25 @@ const {
   reportToCsv,
 } = require('./reportService');
 const logger = require('../utils/logger');
+const { storeReportArtifact } = require('./reportArtifactStorage');
 
 async function processReportJob(job) {
-  const { jobId, schoolId, type, startDate, endDate, timezone, schemaVersion } = job.data;
+  const { jobId, schoolId, type, startDate, endDate, timezone, schemaVersion, format = 'json' } = job.data;
 
   await setJobProcessing(jobId);
   logger.info('[ReportQueueService] Processing report job', { jobId, type, schoolId });
 
   try {
+    let artifactKey;
+    let contentType;
+    let actualSchemaVersion = null;
     if (type === 'accounting_csv') {
-      const { csv, schemaVersion: sv } = await generateAccountingCsv({ schoolId, startDate, endDate });
+      const { csv, schemaVersion: sv } = await generateAccountingCsv({ schoolId, startDate, endDate, timezone });
       await setJobCompleted(jobId, { csv, schemaVersion: sv });
       return { success: true, jobId, type };
     }
 
-    const report = await generateReport({ schoolId, startDate, endDate, timezone });
-    await setJobCompleted(jobId, { report });
+    await setJobCompleted(jobId, { artifactKey, schemaVersion: actualSchemaVersion || schemaVersion });
     return { success: true, jobId, type };
   } catch (err) {
     await setJobFailed(jobId, err);
@@ -39,8 +42,9 @@ async function processReportJob(job) {
 
 let worker = null;
 
-async function startWorker() {
+function startWorker() {
   if (worker) return worker;
+  createQueue();
   worker = startReportWorker(processReportJob);
   if (worker) {
     logger.info('[ReportQueueService] Report worker started');

@@ -10,15 +10,18 @@
  *      console) — see emailProvider.js.
  *   3. Retries transient failures with exponential backoff + jitter so an email
  *      that fails for a blip is not silently lost.
+ *   4. Wraps each send attempt with the per-provider circuit breaker so that a
+ *      repeatedly-failing provider trips its breaker and fails fast until it
+ *      recovers (Issue #31).
  *
  * Bounce/complaint handling is asynchronous (provider webhooks → suppressionList),
  * see controllers/emailWebhookController.js.
  */
 
-const config = require('../../config');
 const logger = require('../../utils/logger').child('EmailService');
 const { getProvider } = require('./emailProvider');
 const suppressionList = require('./suppressionList');
+const { withBreaker } = require('../providerCircuitBreakerRegistry');
 
 const MAX_RETRIES = parseInt(process.env.EMAIL_MAX_RETRIES, 10) || 3;
 const RETRY_BASE_MS = parseInt(process.env.EMAIL_RETRY_BASE_MS, 10) || 500;
@@ -32,6 +35,18 @@ function backoff(attempt) {
   const base = Math.min(RETRY_BASE_MS * Math.pow(2, attempt - 1), RETRY_MAX_MS);
   // +/- 20% jitter to avoid synchronised retries when many sends fail at once.
   return Math.round(base * (0.8 + Math.random() * 0.4));
+}
+
+/**
+ * Derive the circuit-breaker provider key from the active email provider name.
+ * Maps provider.name ('smtp', 'ses', 'sendgrid', 'console') to the registry key.
+ * Returns null for unmapped providers (e.g. 'console') — those are not circuit-broken.
+ * @param {string} providerName
+ * @returns {string|null}
+ */
+function _cbKeyForProvider(providerName) {
+  const MAP = { smtp: 'email_smtp', ses: 'email_ses', sendgrid: 'email_sendgrid' };
+  return MAP[providerName] || null;
 }
 
 /**
@@ -62,16 +77,33 @@ async function sendEmail(message) {
   }
 
   const provider = getProvider();
+  const cbKey = _cbKeyForProvider(provider.name);
 
-  // 2. Send with retry on transient failure.
+  // 2. Send with retry on transient failure, protected by a per-provider CB.
   let lastError = null;
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const { messageId } = await provider.send(message);
+      let messageId;
+      if (cbKey) {
+        // Wrap the send in the circuit breaker; if the CB is open it throws
+        // immediately with code=CIRCUIT_OPEN and we surface that as a failure.
+        const result = await withBreaker(cbKey, () => provider.send(message));
+        messageId = result.messageId;
+      } else {
+        const result = await provider.send(message);
+        messageId = result.messageId;
+      }
       logger.info('Email sent', { to, category, provider: provider.name, messageId, attempts: attempt });
       return { sent: true, messageId, attempts: attempt, provider: provider.name };
     } catch (err) {
       lastError = err;
+      // If the circuit breaker is open, do not retry — fail fast.
+      if (err.code === 'CIRCUIT_OPEN') {
+        logger.warn('Email skipped — provider circuit open', {
+          to, category, provider: cbKey, error: err.message,
+        });
+        return { sent: false, attempts: attempt, provider: provider.name, error: err.message };
+      }
       const willRetry = attempt < MAX_RETRIES;
       logger.warn('Email send attempt failed', {
         to,

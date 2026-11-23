@@ -5,6 +5,38 @@ const Student = require('../models/studentModel');
 const FeeStructure = require('../models/feeStructureModel');
 const { POOL_CONFIG } = require('../config/database');
 
+function localDateStartUtc(dateString, timezone) {
+  const [year, month, day] = dateString.split('-').map(Number);
+  const target = Date.UTC(year, month - 1, day);
+  let candidate = target;
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  });
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const parts = Object.fromEntries(formatter.formatToParts(new Date(candidate)).map(({ type, value }) => [type, value]));
+    const represented = Date.UTC(
+      Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+      Number(parts.hour), Number(parts.minute), Number(parts.second),
+    );
+    candidate += target - represented;
+  }
+  return new Date(candidate);
+}
+
+function nextDateString(dateString) {
+  const date = new Date(`${dateString}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
 /**
  * Get the data version for cache key generation.
  * Returns the timestamp of the most recent confirmed payment for a school,
@@ -32,8 +64,10 @@ async function aggregateByDate({ schoolId, startDate, endDate, timezone = 'UTC' 
 
   if (startDate || endDate) {
     match.confirmedAt = {};
-    if (startDate) match.confirmedAt.$gte = new Date(startDate + 'T00:00:00.000Z');
-    if (endDate)   match.confirmedAt.$lte = new Date(endDate   + 'T23:59:59.999Z');
+    if (startDate) match.confirmedAt.$gte = localDateStartUtc(startDate, timezone);
+    if (endDate) {
+      match.confirmedAt.$lt = localDateStartUtc(nextDateString(endDate), timezone);
+    }
   }
 
   const rows = await Payment.aggregate([
@@ -404,12 +438,12 @@ const ACCOUNTING_HEADERS_V1 = [
  */
 // Build the $match / $lookup / $sort pipeline shared by the buffered and
 // streaming accounting exports.
-function buildAccountingPipeline({ schoolId, startDate, endDate }) {
+function buildAccountingPipeline({ schoolId, startDate, endDate, timezone = 'UTC' }) {
   const match = { schoolId, status: 'SUCCESS', studentDeleted: { $ne: true }, deletedAt: null };
   if (startDate || endDate) {
     match.confirmedAt = {};
-    if (startDate) match.confirmedAt.$gte = new Date(startDate + 'T00:00:00.000Z');
-    if (endDate)   match.confirmedAt.$lte = new Date(endDate   + 'T23:59:59.999Z');
+    if (startDate) match.confirmedAt.$gte = localDateStartUtc(startDate, timezone);
+    if (endDate) match.confirmedAt.$lt = localDateStartUtc(nextDateString(endDate), timezone);
   }
 
   return [
@@ -459,9 +493,9 @@ function formatAccountingRow(r, exportedAt) {
   ].map(v => csvEscape(v)).join(',');
 }
 
-async function generateAccountingCsv({ schoolId, startDate, endDate } = {}) {
+async function generateAccountingCsv({ schoolId, startDate, endDate, timezone = 'UTC' } = {}) {
   // Enrich with student class via a $lookup
-  const rows = await Payment.aggregate(buildAccountingPipeline({ schoolId, startDate, endDate }));
+  const rows = await Payment.aggregate(buildAccountingPipeline({ schoolId, startDate, endDate, timezone }));
 
   const exportedAt = new Date().toISOString();
   const lines = [ACCOUNTING_HEADERS_V1.map(csvEscape).join(',')];
@@ -483,8 +517,8 @@ async function generateAccountingCsv({ schoolId, startDate, endDate } = {}) {
  *
  * @param {{ schoolId: string, startDate?: string, endDate?: string, res: object }} options
  */
-async function generateAccountingCsvStream({ schoolId, startDate, endDate, res } = {}) {
-  const cursor = Payment.aggregate(buildAccountingPipeline({ schoolId, startDate, endDate })).cursor();
+async function generateAccountingCsvStream({ schoolId, startDate, endDate, timezone = 'UTC', res } = {}) {
+  const cursor = Payment.aggregate(buildAccountingPipeline({ schoolId, startDate, endDate, timezone })).cursor();
   const exportedAt = new Date().toISOString();
 
   res.write(ACCOUNTING_HEADERS_V1.map(csvEscape).join(',') + '\n');

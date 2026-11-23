@@ -36,16 +36,18 @@ async function savePayment(data, options = {}) {
     data = { ...data, referenceCode: await generateReferenceCode() };
   }
   try {
-    const payment = await Payment.create(data, { session, writeConcern: FINANCIAL_WRITE_CONCERN });
+    const payment = new Payment(data);
+    await payment.save(session ? { session } : {});
 
     const eventId = uuidv4();
-    await Outbox.create({
+    const outboxEvent = new Outbox({
       eventId,
       eventType: "payment.saved",
       aggregateId: payment.txHash,
       aggregateType: "payment",
       payload: payment.toObject(),
-    }, { session, writeConcern: FINANCIAL_WRITE_CONCERN });
+    });
+    await outboxEvent.save(session ? { session } : {});
 
     logger.debug("Payment saved with outbox event", {
       txHash: payment.txHash,
@@ -56,6 +58,23 @@ async function savePayment(data, options = {}) {
     return payment;
   } catch (e) {
     if (e.code === 11000) {
+      if (options.allowFailedReplay) {
+        const replayedPayment = await Payment.findOneAndUpdate(
+          { schoolId: data.schoolId, txHash: data.txHash, status: 'FAILED' },
+          { $set: data },
+          { new: true, runValidators: true, session },
+        );
+        if (replayedPayment) {
+          await Outbox.create({
+            eventId: uuidv4(),
+            eventType: 'payment.saved',
+            aggregateId: replayedPayment.txHash,
+            aggregateType: 'payment',
+            payload: replayedPayment.toObject(),
+          }, { session, writeConcern: FINANCIAL_WRITE_CONCERN });
+          return replayedPayment;
+        }
+      }
       const txHash = data.txHash || data.transactionHash;
       const err = new Error(`Transaction ${txHash} has already been processed`);
       err.code = "DUPLICATE_TX";

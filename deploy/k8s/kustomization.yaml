@@ -28,6 +28,7 @@ kind: Kustomization
 resources:
   - backend-deployment.yaml
   - backend-hpa.yaml
+  - worker-hpa.yaml
   - backend-pdb.yaml
   - mongodb-pdb.yaml
   - backend-networkpolicy.yaml

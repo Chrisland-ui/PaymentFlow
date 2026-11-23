@@ -2,7 +2,7 @@
 
 const express = require('express');
 const { rl } = require('../middleware/rateLimiter');
-const { handleLogin, handleRefresh, handleLogout, handleMe, handleListSessions, handleRevokeSession, handleChangePassword } = require('../controllers/authController');
+const { handleLogin, handleRefresh, handleLogout, handleMe, handleListSessions, handleRevokeSession, handleRevokeUserSessions, handleRevokeOwnSessions, handleChangePassword } = require('../controllers/authController');
 const {
   setupMfa, verifyAndEnableMfa, disableMfa, regenerateBackupCodes,
   setupUserMfa, verifyAndEnableUserMfa, disableUserMfa,
@@ -32,7 +32,12 @@ router.post('/change-password', requireSchoolAuth(), handleChangePassword);
 
 // ── Session management ────────────────────────────────────────────────────────
 router.get('/sessions', requireAdminAuth, handleListSessions);
+router.delete('/sessions', requireSchoolAuth(), handleRevokeOwnSessions);
 router.delete('/sessions/:sessionId', requireAdminAuth, handleRevokeSession);
+// Admin revocation by userId — revokes ALL active sessions for the given user.
+// Requires admin auth. Used for account-takeover response and forced password
+// reset scenarios where all refresh tokens must be invalidated immediately.
+router.delete('/sessions/user/:userId', requireAdminAuth, handleRevokeUserSessions);
 
 // ── School-level TOTP / MFA routes (require super-admin auth) ────────────────
 router.post('/mfa/setup',   requireAdminAuth, setupMfa);

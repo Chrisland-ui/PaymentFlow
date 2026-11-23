@@ -1,0 +1,16 @@
+groups:
+  - name: payment_reconciliation
+    interval: 60s
+    rules:
+      - alert: PaymentReconciliationMismatchRateHigh
+        expr: payment_reconciliation_mismatch_rate > payment_reconciliation_mismatch_threshold
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Payment reconciliation mismatch rate exceeds its configured threshold"
+          description: >
+            The latest scheduled payment reconciliation reported a mismatch
+            rate of {{ $value | printf "%.4f" }}, above the configured
+            payment_reconciliation_mismatch_threshold. Review recent run details
+            at GET /api/admin/reconciliation/runs.

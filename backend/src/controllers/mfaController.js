@@ -257,6 +257,18 @@ async function disableMfa(req, res) {
     });
 
     if (!valid) {
+      // Audit failed disable attempt — wrong TOTP code (no secret values logged)
+      await logAudit({
+        schoolId: school.schoolId || slug,
+        action:   'MFA_DISABLE_FAILED',
+        performedBy: req.admin?.username || req.user?.userId || 'admin',
+        targetId:  school._id?.toString() || slug,
+        targetType: 'school',
+        details:   { slug, reason: 'invalid_totp_code' },
+        result:    'failure',
+        errorMessage: 'Invalid TOTP code provided for MFA disable',
+        severity:  'high',
+      }).catch(() => {}); // non-fatal
       return res.status(400).json({ error: 'Invalid TOTP code.', code: 'INVALID_MFA_CODE' });
     }
 

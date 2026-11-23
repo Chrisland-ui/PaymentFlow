@@ -19,6 +19,7 @@ groups:
             minutes ({{ $value | printf "%.4f" }}/s). Check
             horizon_circuit_breaker_state per endpoint (0=closed, 1=open,
             2=half_open) to see which Horizon URL is degraded.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/operator-runbooks.md#horizon-or-stellar-network-down"
 
       # ── Critical: a circuit breaker has been open for a sustained period ──
       # horizon_circuit_breaker_state == 1 means that endpoint has been pulled
@@ -37,6 +38,7 @@ groups:
             been open for over 5 minutes. Traffic is failing over to the next
             configured endpoint (if any). Check that endpoint's health
             directly.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/operator-runbooks.md#horizon-or-stellar-network-down"
 
       # ── Critical: every configured Horizon endpoint is unavailable ───────
       # min() across all endpoints' circuit-breaker state is 1 only when every
@@ -55,3 +57,4 @@ groups:
             for at least 2 minutes. The transaction poller cannot reach
             Horizon at all; no new payments are being confirmed. Page on-call
             immediately.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/operator-runbooks.md#horizon-or-stellar-network-down"

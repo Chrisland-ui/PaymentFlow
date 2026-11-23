@@ -23,6 +23,7 @@ groups:
             being confirmed on-chain, but parents and admins will not receive
             receipts. Search logs for "receipt generation failed" or "Receipt
             subscriber failed" to get the txHash and underlying error.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#receiptgenerationfailures"
 
       # ── Critical: receipts are failing for essentially every payment ─────
       # Compares receipt failures against confirmed-payment throughput. A ratio
@@ -46,3 +47,5 @@ groups:
             pipeline, not isolated bad data. Payments themselves are unaffected
             (funds are on-chain and recorded), but every affected payment will
             need its receipt backfilled once the root cause is fixed.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#receiptgenerationsystemicfailure"
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/observability.md#receiptgenerationsystemicfailure"

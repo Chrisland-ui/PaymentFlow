@@ -1,0 +1,30 @@
+{
+  "id": "scenario-03-on-chain-reverted-backend-confirmed",
+  "description": "Transaction reverted on-chain (blockchain fork / reorganisation) but backend shows confirmed — reconciliation must revert backend status and trigger investigation.",
+  "contractState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000003",
+    "status": "failed",
+    "amount": "200.0000000",
+    "asset": "XLM",
+    "from": "GPARENT3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "to":   "GSCHOOL1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "memo": "STU003",
+    "ledger": 1030,
+    "createdAt": "2026-10-03T09:00:00.000Z",
+    "revertReason": "tx_bad_seq"
+  },
+  "backendState": {
+    "txHash": "aabbcc0000000000000000000000000000000000000000000000000000000003",
+    "status": "confirmed",
+    "amount": 200,
+    "studentId": "STU003",
+    "confirmedAt": "2026-10-03T09:00:10.000Z"
+  },
+  "expectedOutcome": {
+    "action": "revert",
+    "finalBackendStatus": "failed",
+    "divergence": true,
+    "divergenceType": "on_chain_reverted",
+    "alertRequired": true
+  }
+}

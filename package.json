@@ -6,12 +6,15 @@
     "test": "jest --testPathPattern=tests/ --forceExit",
     "coverage": "jest --testPathPattern=tests/ --forceExit --coverage",
     "coverage:frontend": "cd frontend && npm run coverage",
+    "coverage:risk": "jest --testPathPattern=tests/ --forceExit --coverage --coverageReporters=text --silent 2>&1 | grep -E '(All files|services|middleware|controllers|stellarService|authController|webhookService|reconciliation|FAIL|Threshold)'",
     "test:e2e": "jest tests/e2e/ --forceExit --runInBand --testPathIgnorePatterns=/node_modules/",
     "test:integration": "cross-env RUN_INTEGRATION_TESTS=true jest tests/stellar.integration.test.js --forceExit",
     "test:loadsim": "jest --testPathPattern=tests/loadsim/ --testPathIgnorePatterns=/node_modules/ --forceExit",
     "test:docker-healthcheck": "cross-env RUN_DOCKER_COMPOSE_HEALTHCHECK_TESTS=true jest tests/dockerComposeHealthCheck.test.js --forceExit",
     "seed": "node scripts/seed-test-data.js",
-    "check-version-drift": "node scripts/check-version-drift.js"
+    "check-version-drift": "node scripts/check-version-drift.js",
+    "bundle-budget": "node scripts/bundle-budget.js",
+    "check:deps": "npm audit --audit-level=high"
   },
   "devDependencies": {
     "@babel/core": "^7.29.7",
@@ -107,6 +110,48 @@
         "functions": 32,
         "lines": 37,
         "statements": 36
+      },
+      "./backend/src/services/stellarService.js": {
+        "branches": 40,
+        "functions": 45,
+        "lines": 50,
+        "statements": 49
+      },
+      "./backend/src/middleware/auth.js": {
+        "branches": 40,
+        "functions": 40,
+        "lines": 50,
+        "statements": 48
+      },
+      "./backend/src/services/webhookService.js": {
+        "branches": 30,
+        "functions": 35,
+        "lines": 40,
+        "statements": 38
+      },
+      "./backend/src/services/reconciliationService.js": {
+        "branches": 30,
+        "functions": 35,
+        "lines": 40,
+        "statements": 38
+      },
+      "./backend/src/controllers/paymentController.js": {
+        "branches": 25,
+        "functions": 25,
+        "lines": 30,
+        "statements": 28
+      },
+      "./backend/src/controllers/authController.js": {
+        "branches": 25,
+        "functions": 25,
+        "lines": 30,
+        "statements": 28
+      },
+      "./backend/src/services/paymentConfirmationStateMachine.js": {
+        "branches": 40,
+        "functions": 45,
+        "lines": 50,
+        "statements": 48
       }
     }
   },

@@ -7,7 +7,7 @@ export default function ReportsPage() {
   return (
     <>
       <Head>
-        <title>{t("nav.reports")} | {t("app.name")}</title>
+        <title>Reports | StellarEduPay</title>
       </Head>
       <ReportDownload />
     </>

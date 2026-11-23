@@ -67,7 +67,11 @@ describe('monitoring/alerts rule files', () => {
         expect(Array.isArray(group.rules)).toBe(true);
         expect(group.rules.length).toBeGreaterThan(0);
 
-        for (const rule of group.rules) {
+        // Prometheus rule groups can contain both recording rules (with a `record`
+        // field) and alerting rules (with an `alert` field). Only alerting rules
+        // are checked for the required severity/annotations fields.
+        const alertingRules = group.rules.filter((r) => r.alert !== undefined);
+        for (const rule of alertingRules) {
           expect(typeof rule.alert).toBe('string');
           expect(rule.alert.length).toBeGreaterThan(0);
           expect(typeof rule.expr).toBe('string');
@@ -80,7 +84,9 @@ describe('monitoring/alerts rule files', () => {
     });
 
     test('alert names are unique within the file', () => {
-      const names = doc.groups.flatMap((g) => g.rules.map((r) => r.alert));
+      // Only collect alerting rules (not recording rules which have no `alert` field).
+      const names = doc.groups
+        .flatMap((g) => g.rules.filter((r) => r.alert !== undefined).map((r) => r.alert));
       expect(new Set(names).size).toBe(names.length);
     });
   });
@@ -109,6 +115,18 @@ describe('payment-processing critical-path alert coverage', () => {
     'BackupStale',
     'BackupCriticallyStale',
     'BackupNotRun',
+    // #122 — SLO alerts
+    'SLOApiAvailabilityFastBurn',
+    'SLOApiAvailabilitySlowBurn',
+    'SLOPaymentLatencyFastBurn',
+    'SLOPaymentLatencySlowBurn',
+    'SLOWebhookSuccessFastBurn',
+    'SLOWebhookSuccessSlowBurn',
+    'SLOReconciliationLagWarning',
+    'SLOReconciliationLagCritical',
+    'SLORetryQueueDepthWarning',
+    'SLORetryQueueDepthCritical',
+    'SLODeadLetterGrowing',
   ])('%s alert rule exists', (alertName) => {
     expect(allAlertNames()).toContain(alertName);
   });

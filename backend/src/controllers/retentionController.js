@@ -1,0 +1,90 @@
+'use strict';
+
+const { runRetention, ALL_SCOPES } = require('../services/retentionService');
+const logger = require('../utils/logger').child('RetentionController');
+
+/**
+ * POST /api/admin/retention/run
+ *
+ * Body (all optional):
+ *   { dryRun: boolean, scopes: string[] }
+ *
+ * dryRun defaults to true for safety — callers must explicitly pass
+ * dryRun=false to perform live deletions.
+ */
+async function runRetentionHandler(req, res) {
+  const { dryRun = true, scopes } = req.body || {};
+
+  if (typeof dryRun !== 'boolean') {
+    return res.status(400).json({
+      errors: [{ field: 'dryRun', message: 'dryRun must be a boolean' }],
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  // Validate scopes if provided
+  if (scopes !== undefined) {
+    if (!Array.isArray(scopes) || scopes.length > ALL_SCOPES.length || scopes.some((s) => !ALL_SCOPES.includes(s))) {
+      return res.status(400).json({
+        errors: [{ field: 'scopes', message: `Must contain at most ${ALL_SCOPES.length} valid scope names` }],
+        code:  'VALIDATION_ERROR',
+      });
+    }
+    if (scopes.length === 0) {
+      return res.status(400).json({
+        error: 'scopes must be a non-empty array or omitted to run all scopes.',
+        code:  'VALIDATION_ERROR',
+      });
+    }
+  }
+
+  const performedBy = req.user?.id || req.user?.email || 'admin';
+
+  try {
+    const report = await runRetention({ dryRun: Boolean(dryRun), scopes, performedBy });
+    return res.status(200).json(report);
+  } catch (err) {
+    logger.error('Retention run failed', { error: err.message, dryRun, scopes });
+    return res.status(500).json({
+      error: 'Retention run failed.',
+      code:  'INTERNAL_ERROR',
+    });
+  }
+}
+
+async function listDeletionCertificates(req, res) {
+  const rawLimit = Number(req.query.limit || 50);
+  if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 200) {
+    return res.status(400).json({
+      errors: [{ field: 'limit', message: 'limit must be an integer from 1 to 200' }],
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  const DataDeletionCertificate = require('../models/dataDeletionCertificateModel');
+  const certificates = await DataDeletionCertificate.find()
+    .sort({ purgedAt: -1, _id: -1 })
+    .limit(rawLimit)
+    .lean();
+  return res.status(200).json({ certificates, limit: rawLimit });
+}
+
+/**
+ * GET /api/admin/retention/preview
+ *
+ * Convenience alias for a full dry-run across all scopes.
+ * No body required.
+ */
+async function previewRetentionHandler(req, res) {
+  try {
+    const report = await runRetention({ dryRun: true });
+    return res.status(200).json(report);
+  } catch (err) {
+    logger.error('Retention preview failed', { error: err.message });
+    return res.status(500).json({
+      error: 'Retention preview failed.',
+      code:  'INTERNAL_ERROR',
+    });
+  }
+}
+
+module.exports = { runRetentionHandler, previewRetentionHandler, listDeletionCertificates };

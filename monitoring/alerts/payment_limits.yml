@@ -29,6 +29,7 @@ groups:
             out-of-range amounts. Review the effective limits via
             GET /api/admin/payment-limits?schoolId={{ $labels.school_id }} and
             adjust with PUT if warranted — this no longer requires a redeploy.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/payment-limits.md"
 
       # ── Critical: the limits are rejecting most attempted payments ───────
       # Compares rejections against payments entering the funnel. A high ratio
@@ -54,3 +55,4 @@ groups:
             GET /api/admin/payment-limits?schoolId={{ $labels.school_id }}; the
             `source` field shows which layer (school override, global, or the
             env fallback) supplied the active value.
+          runbook_url: "https://github.com/onlyonee1/PaymentFlow/blob/main/docs/payment-limits.md"

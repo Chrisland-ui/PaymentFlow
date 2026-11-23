@@ -75,6 +75,10 @@ const webhookEndpointSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    consecutiveFailures: { type: Number, default: 0, min: 0 },
+    lastDeliveredAt: { type: Date, default: null },
+    lastFailedAt: { type: Date, default: null },
+    lastStatusCode: { type: Number, default: null },
   },
   { timestamps: true }
 );

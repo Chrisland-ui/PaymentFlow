@@ -17,6 +17,7 @@ const { initiateRefund, approveRefund, getRefundsByPayment, getRefundsBySchool }
 const { generateReconciliationReport } = require('../services/reconciliationService');
 const lock = require('../services/distributedLock');
 const { ADMIN_PAYMENT_STATUS_TRANSITIONS, PAYMENT_STATUS } = require('../constants/paymentStatus');
+const { transition: paymentTransition, InvalidTransitionError } = require('../services/paymentTransitionService');
 
 // TTL for the per-school distributed sync lock (60 s — long enough to complete
 // a full blockchain sync while short enough to auto-expire after a crash).
@@ -286,6 +287,9 @@ const ALLOWED_TRANSITIONS = ADMIN_PAYMENT_STATUS_TRANSITIONS;
  * entry. Shared by the single-payment and bulk endpoints so the two can never
  * diverge on validation, the transition table, or what gets audited.
  *
+ * Delegates to paymentTransitionService.transition() which is the single
+ * authoritative path for all payment status changes (Issue #32).
+ *
  * @param {object} params
  * @param {object} params.req - The request, for schoolId and auditContext
  * @param {string} params.txHash
@@ -299,36 +303,21 @@ async function applyStatusTransition({ req, txHash, newStatus, reason }) {
     return { ok: false, error: 'Payment not found', code: 'NOT_FOUND' };
   }
 
-  const previousStatus = payment.status;
-  const allowed = ALLOWED_TRANSITIONS[previousStatus] || [];
-  if (!allowed.includes(newStatus)) {
-    return {
-      ok: false,
-      error: `Cannot transition from ${previousStatus} to ${newStatus}`,
-      code: 'INVALID_TRANSITION',
-    };
+  try {
+    return await paymentTransition(payment, newStatus, {
+      adminOverride: true,
+      reason,
+      performedBy:  req.auditContext?.performedBy || 'unknown',
+      schoolId:     req.schoolId,
+      ipAddress:    req.auditContext?.ipAddress,
+      userAgent:    req.auditContext?.userAgent,
+    });
+  } catch (err) {
+    if (err instanceof InvalidTransitionError) {
+      return { ok: false, error: err.message, code: err.code };
+    }
+    throw err;
   }
-
-  // Set $locals.adminOverride so the pre-save hook uses ADMIN_PAYMENT_STATUS_TRANSITIONS
-  // instead of the narrower PAYMENT_STATUS_TRANSITIONS.  $locals is Mongoose's
-  // per-document transient store — it is never persisted and survives through save().
-  payment.$locals.adminOverride = true;
-  payment.status = newStatus;
-  const updated = await payment.save();
-
-  await logAudit({
-    schoolId: req.schoolId,
-    action: 'payment_status_update',
-    performedBy: req.auditContext?.performedBy || 'unknown',
-    targetId: txHash,
-    targetType: 'payment',
-    details: { from: previousStatus, to: newStatus, reason, adminOverride: true },
-    result: 'success',
-    ipAddress: req.auditContext?.ipAddress,
-    userAgent: req.auditContext?.userAgent,
-  });
-
-  return { ok: true, payment: updated, previousStatus };
 }
 
 /**

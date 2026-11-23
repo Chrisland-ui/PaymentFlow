@@ -29,6 +29,7 @@
  */
 
 const Decimal = require('decimal.js');
+const { toStroops } = require('./decimalPrecision');
 
 // XLM and USDC both carry exactly 7 decimal places on Stellar.
 const MONEY_DECIMALS = 7;
@@ -63,7 +64,9 @@ function toMoneyNumber(value) {
 
 /** -1 / 0 / 1, exact — never affected by float epsilon. */
 function compareMoney(a, b) {
-  return toMoney(a).cmp(toMoney(b));
+  const unitsA = BigInt(toStroops(roundMoney(a).toFixed(MONEY_DECIMALS)));
+  const unitsB = BigInt(toStroops(roundMoney(b).toFixed(MONEY_DECIMALS)));
+  return unitsA < unitsB ? -1 : unitsA > unitsB ? 1 : 0;
 }
 
 function moneyEquals(a, b) {
@@ -81,8 +84,12 @@ function moneyEquals(a, b) {
  */
 function classifyFeePayment(cumulativeTotal, feeAmount) {
   const cumulative = roundMoney(cumulativeTotal);
-  const fee = toMoney(feeAmount);
-  const cmp = cumulative.cmp(fee);
+  const fee = roundMoney(feeAmount);
+  const cumulativeUnits = BigInt(toStroops(cumulative.toFixed(MONEY_DECIMALS)));
+  const feeUnits = BigInt(toStroops(fee.toFixed(MONEY_DECIMALS)));
+  const cmp = cumulativeUnits < feeUnits ? -1 : cumulativeUnits > feeUnits ? 1 : 0;
+  const cumulativeExact = new Decimal(cumulativeUnits.toString()).div(10 ** MONEY_DECIMALS);
+  const feeExact = new Decimal(feeUnits.toString()).div(10 ** MONEY_DECIMALS);
 
   let status;
   if (cmp < 0) status = 'partial';
@@ -92,9 +99,9 @@ function classifyFeePayment(cumulativeTotal, feeAmount) {
   return {
     status,
     feePaid: cmp >= 0,
-    cumulativeTotal: cumulative.toNumber(),
-    excessAmount: status === 'overpaid' ? toMoneyNumber(cumulative.minus(fee)) : 0,
-    remainingBalance: toMoneyNumber(Decimal.max(0, fee.minus(cumulative))),
+    cumulativeTotal: toMoneyNumber(cumulativeExact),
+    excessAmount: status === 'overpaid' ? toMoneyNumber(cumulativeExact.minus(feeExact)) : 0,
+    remainingBalance: toMoneyNumber(Decimal.max(0, feeExact.minus(cumulativeExact))),
   };
 }
 
