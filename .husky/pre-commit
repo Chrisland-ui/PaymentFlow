@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+# .husky/pre-commit
+# Runs gitleaks before every commit to prevent secret material reaching the
+# remote.  Install hooks once with: npm run prepare
+#
+# If gitleaks is not installed the hook warns but does NOT block the commit,
+# so developers without it can still commit while CI enforces the same check
+# unconditionally via the secret-scan-gitleaks job in .github/workflows/ci.yml.
+
+. "$(dirname -- "$0")/_/husky.sh"
+
+if command -v gitleaks >/dev/null 2>&1; then
+  echo "[pre-commit] Running gitleaks secret scan..."
+  gitleaks protect --staged --config .gitleaks.toml --redact
+else
+  echo "[pre-commit] WARNING: gitleaks is not installed — skipping local secret scan."
+  echo "             Install it from https://github.com/gitleaks/gitleaks and re-run 'npm run prepare'."
+  echo "             CI will still enforce secret scanning on every push."
+fi

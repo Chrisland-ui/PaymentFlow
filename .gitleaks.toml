@@ -1,0 +1,70 @@
+# .gitleaks.toml
+# Gitleaks configuration for PaymentFlow.
+# Custom rules augment the default ruleset to catch Stellar secret keys and
+# other PaymentFlow-specific secret patterns.
+# See: https://github.com/gitleaks/gitleaks
+
+title = "PaymentFlow Gitleaks Configuration"
+
+[extend]
+# Extend the default gitleaks ruleset so standard patterns (AWS keys,
+# GitHub tokens, generic API keys, etc.) are inherited automatically.
+useDefault = true
+
+[[rules]]
+id          = "stellar-secret-key"
+description = "Stellar StrKey secret key (S-prefix, 56 Base32 chars)"
+# Stellar secret key: uppercase S followed by exactly 55 Base32 characters
+# (A-Z and 2-7).  Total token length is 56.
+regex       = '''(?:^|[^A-Z2-7])(S[A-Z2-7]{55})(?:[^A-Z2-7]|$)'''
+secretGroup = 1
+keywords    = ["stellar", "STELLAR", "secret", "SECRET", "key", "KEY"]
+
+  [rules.allowlist]
+  # Stellar public keys (G-prefix) are safe — they appear in config and docs.
+  regexes = [
+    # Reject matches that are actually public keys embedded in longer strings
+    '''GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5''',
+  ]
+  paths = [
+    # Test fixtures and documentation are intentionally safe
+    '''tests/''',
+    '''docs/''',
+    '''\.md$''',
+  ]
+
+[[rules]]
+id          = "jwt-hex-secret"
+description = "Realistic hex string assigned to a *_SECRET or *_KEY variable"
+# Matches lines like: JWT_SECRET=a3f8b2c1...  (64 or 128 lowercase hex chars)
+# Excludes obviously-fake values: all-zeros, single-char-repeated, sequential.
+regex       = '''(?i)[A-Z][A-Z0-9_]*(?:SECRET|KEY|TOKEN|PASS)\s*=\s*([0-9a-f]{64}|[0-9a-f]{128})'''
+secretGroup = 1
+keywords    = ["SECRET", "KEY", "TOKEN", "PASS"]
+
+  [rules.allowlist]
+  # Exclude known-fake placeholder values used in CI and documentation
+  regexes = [
+    '''0{64}''',
+    '''0{128}''',
+    '''(0123456789abcdef){4}''',
+    '''(0123456789abcdef){8}''',
+  ]
+  paths = [
+    '''\.example$''',
+    '''\.md$''',
+    '''tests/''',
+    '''docs/''',
+  ]
+
+[allowlist]
+description = "Global allowlist — files that intentionally contain secret-shaped strings"
+paths = [
+  # The scanner test itself exercises synthetic credential patterns
+  '''tests/scanRepoSecrets\.test\.js''',
+  # Security exceptions manifest
+  '''security-exceptions\.json''',
+  # Example env files (contain placeholder values only)
+  '''\.env\.example''',
+  '''backend/\.env\.example''',
+]
